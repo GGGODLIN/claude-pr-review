@@ -1,5 +1,7 @@
 # claude-pr-review
 
+![claude-pr-review — Five review axes. One verified report.](assets/claude-pr-review-hero.png)
+
 Multi-axis PR review orchestration for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — one `/pr-review <PR-URL>` command that runs up to five independent review perspectives against the same pull request, cross-verifies every finding between axes, and compiles a single comparison report with copy-paste-ready inline comments.
 
 Built and battle-tested over months of daily production PR review. Extracted from the author's personal setup; see [Prerequisites](#prerequisites) honestly before expecting it to run as-is.
