@@ -4,6 +4,8 @@ Multi-axis PR review orchestration for [Claude Code](https://docs.anthropic.com/
 
 Built and battle-tested over months of daily production PR review. Extracted from the author's personal setup; see [Prerequisites](#prerequisites) honestly before expecting it to run as-is.
 
+**Why this design** — the methodology behind the command, told through real catches and misses (a dead Save button four reviewers missed, red-team refutation rates, why consensus still gets verified): [一個模型不夠：五軸交叉審的 code review 工作流](https://gggodlin.github.io/blog/one-model-not-enough/) (zh-TW). The article states the three design philosophies; this repo is the implementation, and has kept evolving since it was written (formal-spec gate, provenance discipline, Codex presets came later) — where they differ, the command file is current.
+
 ## Why multi-axis
 
 A single reviewer — human or model — has a single blind spot profile. This command deliberately combines perspectives with *different* blind spots:
