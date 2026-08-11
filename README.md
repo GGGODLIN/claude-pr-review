@@ -60,7 +60,7 @@ Tiered honestly — the command degrades gracefully when an axis is missing (it 
 **Per-axis (optional, skip = axis skipped)**
 - Codex axes: OpenAI Codex CLI + the Codex Claude Code plugin
 - Gemini axes: `agy` (Google Antigravity CLI) with a signed-in account
-- Blast radius: [`sem`](https://github.com/search?q=sem+code+dependency&type=repositories) indexed for your repo
+- Blast radius: [`sem`](https://github.com/Ataraxy-Labs/sem) indexed for your repo
 - React mechanical axis: `npx react-doctor` (auto-skipped on non-React PRs)
 
 **Bitbucket only**
