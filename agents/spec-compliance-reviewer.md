@@ -6,7 +6,7 @@ model: opus
 effort: xhigh
 ---
 
-<!-- 本檔在契約測試底下：commands/tests/test_pr_review_c4_dispatch_contract.py + scripts/test_pr_review_c4.py -->
+<!-- Contract-tested by commands/tests/test_pr_review_c4_dispatch_contract.py — run it after editing this file. -->
 
 # Spec Compliance Reviewer
 

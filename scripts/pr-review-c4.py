@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# This file is covered by scripts/test_pr_review_c4.py. Run that file after changes.
+# Its dispatch wiring is contract-tested by commands/tests/test_pr_review_c4_dispatch_contract.py.
+# No behavioral test suite ships with this repo — see README "Caution" before changing reducer logic.
 
 import argparse
 import hashlib
