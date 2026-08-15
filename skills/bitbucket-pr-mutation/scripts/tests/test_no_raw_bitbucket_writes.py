@@ -43,25 +43,43 @@ class WorkflowContractTests(unittest.TestCase):
     cls.standalone = BITBUCKET_REVIEW.read_text(encoding='utf-8')
     cls.command = PR_REVIEW.read_text(encoding='utf-8')
 
-  def test_standalone_review_binds_exact_commit_pair(self):
+  def test_standalone_followup_binds_exact_commit_pair(self):
     self.assertIn('{source_commit}%0D{dest_commit}', self.standalone)
     self.assertIn('source_repo_uuid', self.standalone)
     self.assertIn('destination_repo_uuid', self.standalone)
     self.assertIn('input_binding: verified', self.standalone)
-    self.assertIn('# PR #{id} Review · SHA', self.standalone)
+    self.assertIn('## 定點複查結果', self.standalone)
+    self.assertIn('git diff "{destination_sha}...{source_sha}"', self.standalone)
+    self.assertIn('不得退回 moving branch ref', self.standalone)
+    self.assertNotIn('git diff origin/{dest}...origin/{source}', self.standalone)
     self.assertIn('refetch PR details', self.standalone)
     self.assertIn('bitbucket-pr-mutation', self.standalone)
+    self.assertIn('without a formal finding may omit `finding_uid`', self.standalone)
+    self.assertIn('mutation helper treats it as optional', self.standalone)
 
-  def test_both_reports_require_stable_uid_and_action(self):
-    for text in (self.standalone, self.command):
-      self.assertIn('finding_uid', text)
-      self.assertIn('display_ordinal', text)
-      self.assertIn('action_reason', text)
-      self.assertIn('auto-fix', text)
-      self.assertIn('ask-user', text)
-      self.assertIn('no-op', text)
-      self.assertIn('auto-fix 只是處置建議', text)
-      self.assertIn('不修改 code、commit、push 或 PR', text)
+  def test_standalone_followup_does_not_expand_into_full_scan(self):
+    self.assertIn('standalone 定點複查不執行全 PR React-doctor', self.standalone)
+    self.assertNotIn('#### 3.1 React Mechanical Scan', self.standalone)
+    self.assertIn('完整機械掃描由 `/pr-review` 負責', self.standalone)
+
+  def test_formal_report_contract_belongs_only_to_pr_review(self):
+    for marker in (
+      'finding_uid',
+      'display_ordinal',
+      'action_reason',
+      'auto-fix',
+      'ask-user',
+      'no-op',
+      'auto-fix 只是處置建議',
+      '不修改 code、commit、push 或 PR',
+      'skill-verify:pr-review',
+    ):
+      with self.subTest(marker=marker):
+        self.assertIn(marker, self.command)
+    self.assertNotIn('skill-verify:bitbucket-pr-review', self.standalone)
+    self.assertNotIn('### 8. Self-Verify', self.standalone)
+    self.assertIn('完整 PR review 請改用 `/pr-review`', self.standalone)
+    self.assertIn('定點複查', self.standalone)
 
   def test_github_fetch_supplies_exact_binding_values(self):
     self.assertIn('headRefOid,baseRefOid,headRepository', self.command)

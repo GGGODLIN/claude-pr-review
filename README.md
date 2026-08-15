@@ -28,17 +28,22 @@ The design principle borrowed from security auditing: **the agent that finds an 
 - **Deterministic re-anchoring** — findings carry verbatim source anchors and are re-located by exact match before the report, so line numbers survive model drift
 - **Provenance discipline** — on hotfix→staging PRs, files inherited from the default branch are detected and capped so their defects don't land on an innocent author
 - **Severity calibration gates** — Must Fix requires a concrete user-visible repro path *and* a shippable-thing broken; severity built on unverified premises gets recomputed without them
-- **A formal-spec compliance lane (experimental)** — normative spec clauses (MUST/SHALL, invariants, formulas) are extracted, canonicalized by a deterministic reducer (`scripts/pr-review-c4.py`), and traced against authored hunks with full hash binding
+- **A formal-spec compliance lane (experimental)** — normative spec clauses (MUST/SHALL, invariants, formulas) are extracted, canonicalized by a deterministic reducer (`scripts/pr-review-c4.py`), dispatched through a hash-bound single-use envelope (optionally enforced by a PreToolUse permit-gate hook), and traced against authored hunks with full hash binding
+- **Two-layer report publication** — the full-evidence audit report (`pr-<id>-review.audit.md`) is canonical; the decision-facing main report (`pr-<id>-review.md`) is produced from it by a deterministic projection helper (`scripts/pr-review-report-projection.py`), never rewritten by a model, with a shared generation hash binding the pair
+- **Report Self-Verify gate** — before publication a read-only auditor subagent checks the draft against a fixed R1–R10 rubric (input binding, axis states, per-file coverage, severity calibration, silent-skip disclosure); violations must be repaired with evidence before the report ships
 - **Traditional Chinese comparison report** with colloquial, paste-ready inline comment blocks (the command's working language is bilingual zh-TW/English; reports render in zh-TW — fork and adjust if you want another language)
 
 ## Repo layout
 
 ```
 commands/pr-review.md            the orchestrator command (install → ~/.claude/commands/)
+commands/tests/                  contract tests pinning the command's report/dispatch wiring (run in-repo)
 agents/*.md                      five reviewer subagents + one rubric auditor (install → ~/.claude/agents/)
-scripts/pr-review-c4.py          deterministic spec-clause reducer
+scripts/pr-review-c4.py          deterministic spec-clause reducer + dispatch envelope/permit issuer
+scripts/pr-review-report-projection.py   deterministic audit→main report projection (Step 6 publication)
 scripts/poll-liveness.sh         background-process poll helper (3-signal: done/dead/stuck)
 scripts/sem-pr-blast-radius.sh   entity-level dependency blast radius (needs `sem`)
+hooks/pr-review-c4-dispatch-gate.py     optional PreToolUse permit gate for the formal-spec dispatch
 references/severity-calibration.md      security impact×likelihood matrix
 references/finding-severity-rules.md    6c/6d gates: Must/Should/Nice calibration (platform-neutral SSOT)
 skills/bitbucket-pr-review/      optional Bitbucket adapter, read path (GitHub needs none of this — `gh` covers it)
@@ -70,6 +75,7 @@ Tiered honestly — the command degrades gracefully when an axis is missing (it 
 
 - The Codex sections mutate `~/.codex/config.toml` during a run (MCP strip + effort override, pristine-backup + restore). Read Step 3 and Step 7 before first use.
 - `skills/bitbucket-pr-mutation` is the only write path to Bitbucket and is deliberately ceremony-heavy (typed approval, proposal hashing, read-back). Its contract tests also pin the command's Step 8 wording — run `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q` after editing either file.
+- `commands/pr-review.md` is additionally pinned by three contract tests in `commands/tests/` (report projection wiring, C4 dispatch envelope, report Self-Verify). Run all three after editing the command or the `spec-compliance-reviewer` agent — the command's header lists the exact invocations.
 - Costs are real: a default-preset run of a mid-size PR spends tens of minutes wall-clock and millions of Codex tokens. Presets (`light` / `sol-lite`) exist for a reason.
 
 ## License

@@ -44,7 +44,40 @@ chmod +x ~/.claude/scripts/poll-liveness.sh ~/.claude/scripts/sem-pr-blast-radiu
 
 `pr-review-c4.py` (formal-spec gate only) needs Python ≥ 3.9 and the `jsonschema` package (`pip3 install jsonschema`). Without them the gate fails on first use instead of degrading — install them, or expect to answer `SKIPPED` on spec-bearing PRs.
 
-References are read during severity calibration on every run. Scripts only execute when their axis is enabled (`poll-liveness.sh` → Codex axes; `pr-review-c4.py` → formal-spec gate; `sem-pr-blast-radius.sh` → auto-skips unless [`sem`](https://github.com/Ataraxy-Labs/sem) is installed and indexed).
+`pr-review-report-projection.py` (Step 6 report publication — runs on **every** review) needs the `markdown-it-py` package (`pip3 install markdown-it-py`). It deterministically projects the full-evidence audit report into the decision-facing main report; without it Step 6 cannot publish.
+
+References are read during severity calibration on every run. `pr-review-report-projection.py` runs at Step 6 on every review; the other scripts only execute when their axis is enabled (`poll-liveness.sh` → Codex axes; `pr-review-c4.py` → formal-spec gate; `sem-pr-blast-radius.sh` → auto-skips unless [`sem`](https://github.com/Ataraxy-Labs/sem) is installed and indexed).
+
+## Package 3b: C4 dispatch permit gate (optional, defense-in-depth)
+
+The formal-spec gate's dispatch envelope issues a single-use session permit; this PreToolUse hook makes Claude Code **enforce** it — the `spec-compliance-reviewer` Agent call is denied unless it matches the permit's pre-issued hash byte-for-byte. Without the hook the same four-field contract binds by convention and the runtime receipt is the backstop, so this package is optional but recommended if you use the formal-spec gate.
+
+```bash
+mkdir -p ~/.claude/hooks && cp hooks/pr-review-c4-dispatch-gate.py ~/.claude/hooks/ && chmod +x ~/.claude/hooks/pr-review-c4-dispatch-gate.py
+```
+
+Then register it in `~/.claude/settings.json` (merge into your existing `hooks` section):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/pr-review-c4-dispatch-gate.py || exit 2",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook is inert for every Agent call except `subagent_type: spec-compliance-reviewer`, so it adds no friction to normal work.
 
 ## Package 4: external axis tools (optional, per axis)
 
@@ -81,8 +114,12 @@ ls ~/.claude/agents/{typescript,python,code,security,spec-compliance}-reviewer.m
 test -x ~/.claude/scripts/poll-liveness.sh && test -x ~/.claude/scripts/sem-pr-blast-radius.sh && echo "scripts ok"
 command -v gh   # GitHub PRs
 
+# Report projection (required — Step 6 publication)
+python3 -c 'import markdown_it; print("projection deps ok")'
+
 # Formal-spec gate (optional)
 python3 -c 'import sys, jsonschema; assert sys.version_info >= (3, 9); print("c4 deps ok")'
+test -x ~/.claude/hooks/pr-review-c4-dispatch-gate.py && echo "c4 permit gate installed (optional)"
 
 # Codex axes (optional)
 command -v codex && command -v node && command -v sqlite3
@@ -99,6 +136,8 @@ command -v npx
 python3 -c 'import sys; assert sys.version_info >= (3, 10); print("bitbucket adapter python ok")'
 ```
 
-Then run a smoke review on a small real PR: `/pr-review <URL of a 1-3 file PR>`. Expect: worktree created under `.worktrees/review-pr-<id>`, the two preset questions (Gemini Pro opt-in, Codex preset — answer with defaults), a zh-TW comparison report at `<repo-root>/pr-<id>-review.md`, and the worktree cleaned up afterwards. Missing optional axes appear as noted gaps in the report header.
+Then run a smoke review on a small real PR: `/pr-review <URL of a 1-3 file PR>`. Expect: worktree created under `.worktrees/review-pr-<id>`, the two preset questions (Gemini Pro opt-in, Codex preset — answer with defaults), a report Self-Verify pass, then two zh-TW reports at `<repo-root>`: the decision-facing `pr-<id>-review.md` plus the full-evidence `pr-<id>-review.audit.md`, and the worktree cleaned up afterwards. Missing optional axes appear as noted gaps in the report header.
 
 Bitbucket installs: additionally run the contract tests once — `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q` (expect `OK`, one skip is normal).
+
+If you edit `commands/pr-review.md` or the agents in this repo, run the repo's contract tests before shipping the edit: `python3 commands/tests/test_pr_review_report_projection_contract.py && python3 commands/tests/test_pr_review_c4_dispatch_contract.py && python3 commands/tests/test_pr_review_self_verify_contract.py`.

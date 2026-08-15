@@ -1,6 +1,6 @@
 ---
 name: bitbucket-pr-review
-description: "Use when user provides a Bitbucket PR URL (bitbucket.org/*/pull-requests/*), asks to review a Bitbucket PR, or says 'code review' with a Bitbucket link. Do NOT use for: GitHub PRs (use gh CLI instead), simple Bitbucket workspace/repo browsing without PR context, PR status queries needing only metadata (call bb_api.sh directly without invoking full review flow), or non-review Bitbucket mutations (delegate those to bitbucket-pr-mutation)."
+description: "Use when the user asks to inspect an existing Bitbucket finding, comment, author reply, diff location, or PR evidence without running a full code review. Full PR code review and formal review reports must use `/pr-review`. Do NOT use for GitHub PRs, metadata-only status lookups that need one `bb_api.sh` call, or Bitbucket mutations handled by `bitbucket-pr-mutation`."
 ---
 
 # Bitbucket PR Review
@@ -8,7 +8,9 @@ description: "Use when user provides a Bitbucket PR URL (bitbucket.org/*/pull-re
 > ⚠️ **本檔在契約測試底下**：`skills/bitbucket-pr-mutation/scripts/tests/test_no_raw_bitbucket_writes.py` 會讀本檔做內容斷言，並掃描全檔有無 raw curl POST/PUT/DELETE。改完跑：
 > `cd <repo-root>/skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q`
 
-Review Bitbucket Cloud pull requests by fetching data via REST API.
+Inspect Bitbucket Cloud pull request evidence through read-only REST API calls.
+
+完整 PR review 請改用 `/pr-review`。本 skill 只處理既有 finding、留言、作者回覆、diff 位置或 PR 證據的定點複查，不產出正式 review 報告，也不派報告 auditor。
 
 ## Config
 
@@ -68,7 +70,7 @@ input_binding: verified
 reviewed_at: "{timestamp}"
 ```
 
-Set `input_binding: verified` only when both repository UUIDs are present, both SHA values are full 40-character hashes, and every diffstat／diff／src request below uses this exact commit pair. Otherwise set `input_binding: unverified`; the report must not claim a Reviewed SHA.
+Set `input_binding: verified` only when both repository UUIDs are present, both SHA values are full 40-character hashes, and every diffstat／diff／src request below uses this exact commit pair. Otherwise set `input_binding: unverified`; the focused verdict must not claim a Reviewed SHA.
 
 #### 2.1 Load author calibration file (if present)
 
@@ -79,7 +81,7 @@ Slugify `author.display_name` (lowercase, spaces → hyphens, e.g. `Ada Lovelace
 ```
 
 - File exists → load it and keep the author's entries in context; they apply at 6d rule 4 (severity calibration).
-- File missing → proceed normally; no calibration applies. Do not create the file. The report still carries one line:「無作者校準檔（<author-slug>.md 不存在）、本輪無套用」— keeps "ran, no file" distinguishable from "step skipped" in report audits.
+- File missing → proceed normally; no calibration applies. Do not create the file. The focused verdict still carries one line:「無作者校準檔（<author-slug>.md 不存在）、本輪無套用」— keeps "ran, no file" distinguishable from "step skipped".
 
 Calibration entries record how a specific author historically responds to review comments (which finding types they accept vs reject). They tune severity and comment phrasing for that author only — they never introduce new findings and never upgrade severity.
 
@@ -96,24 +98,7 @@ Get `source_commit` and `dest_commit` from `review_input_basis`, not from branch
 
 The exact commit-pair path is `{source_commit}%0D{dest_commit}`. Do not replace either side with a moving branch ref.
 
-If the diffstat contains any `.jsx` / `.tsx` file → run 3.1 before continuing. Otherwise skip straight to Step 4.
-
-#### 3.1 React Mechanical Scan (react-doctor) — only when diffstat contains `.jsx` / `.tsx`
-
-Run the bundled scan script. It fetches origin, checks out the PR source commit in a temp worktree, and scans only files changed vs dest — never scan your local working tree instead; it may not match the PR's actual code (wrong branch / uncommitted state), and "no new issues" against the wrong target is worse than no scan.
-
-```bash
-bash <skill_dir>/scripts/react_doctor_scan.sh <local-repo-path> {source_commit} {dest_commit}
-```
-
-Pass the local clone path of the repo the PR belongs to. Takes ~15-60s (npx download + scan).
-
-Output handling:
-
-- `{"skipped": "<reason>"}` → note the reason and continue; the 6e report shows `SKIPPED (<reason>)` in its React-doctor section. Never block the review on scan failure, and never fall back to scanning the local working tree.
-- Diagnostics JSON → keep the raw hits; when composing findings (6d/6e), classify each hit against the Step 4 diff: **new** (file:line falls on a `+` line) vs **pre-existing** (changed file, untouched line). Only new hits become review findings — they enter 6d severity calibration like any other finding (mechanical hits are severity 素材, not automatic Must Fix; rule id + file:line already satisfies 6b's evidence requirement). Pre-existing hits appear only as a one-line count.
-
-After this step, continue to Step 4.
+Diffstat 只用來定位使用者點名的檔案與 spec／plan；standalone 定點複查不執行全 PR React-doctor，也不從未點名的檔案產生新 finding。完整機械掃描由 `/pr-review` 負責。
 
 ### 4. Fetch Diff
 
@@ -129,7 +114,11 @@ If diff is too large, fetch per file using diffstat paths.
 bash <skill_dir>/scripts/bb_api.sh "/repositories/{workspace}/{repo}/pullrequests/{id}/comments"
 ```
 
-### 6. Perform Code Review
+### 6. Focused Follow-up
+
+只針對使用者點名的既有 finding、留言、作者回覆或 diff 位置查證。若請求需要完整逐檔 review、多軸比較或正式報告，停止本流程並改用 `/pr-review`。
+
+下列 6a–6d 是 `/pr-review` 引用的查證與校準規則；定點複查只套用與目標 finding 直接相關的部分，不展開正式報告。
 
 #### 6a. Detect Spec / Plan Docs in PR
 
@@ -151,11 +140,11 @@ bash <skill_dir>/scripts/bb_api.sh "/repositories/{workspace}/{repo}/src/{source
 
 If combined spec content > ~8000 tokens, summarise before feeding into the review context (keep goals, non-goals, decisions, constraints — drop prose).
 
-Use spec content when applying 6b (search-before-flag context) and 6c (design intent ground truth for refactor PRs): if spec marks something as out-of-scope, do NOT flag it even if code seems incomplete. Quote the relevant spec passage in the final report.
+Use spec content when applying 6b (search-before-flag context) and 6c (design intent ground truth for refactor PRs): if spec marks something as out-of-scope, do NOT uphold the target finding on that basis. Quote the relevant spec passage in the focused verdict.
 
 **Spec-mapping self-check — before citing spec as evidence AGAINST the code**: quoting a real spec passage is not enough; the passage must describe the same flow as the code being flagged. Ask "does this spec section's subject (the flow/feature it governs) match the code path I am commenting on?" If the spec section governs flow A (e.g. error handling during redemption) and the flagged code implements flow B (e.g. listing already-redeemed items), do not cite it — the citation would be accurate text applied to the wrong target, which is worse than no citation because spec quotes carry authority. Real miss: a review cited spec lines governing redemption-flow errors against fetch-redeemed-list code; the author correctly rejected it as「不一樣的東西」.
 
-If no spec is detected, note it in the report ("此 PR 未附 spec／plan 文件") and proceed normally.
+If no spec is detected, note it in the focused verdict ("此 PR 未附 spec／plan 文件") and proceed normally.
 
 After this step, continue to 6b — Context-Gathering Discipline.
 
@@ -212,79 +201,25 @@ After this step, continue to 6c — Refactor Intent Gate.
 
 Both gates live in the platform-neutral SSOT `~/.claude/references/finding-severity-rules.md` (in this repo: `references/finding-severity-rules.md`) — shared with the `/pr-review` multi-axis command. Run 6c (design-intent verification for "protection removed/weakened" findings) then 6d (Must / Should / Nice calibration; in this single-axis flow rules 1, 3, 4 apply and rule 2 is N/A) exactly as written there, then continue to 6e.
 
-#### 6e. Output
+#### 6e. Focused Verdict
 
-**Finding narrative structure — applies to every finding whose trigger path crosses a boundary or spans ≥2 hops** (page↔page, frontend↔server, or a round-trip through an external system like Shopify). Write the finding in two layers, observation first:
+Before rendering the verdict, refetch PR details and compare the current source／destination repository UUIDs and full SHA values with `review_input_basis`. Render `source_continuity`, `base_changed`, and `review_context_changed`; list exact new commits when ancestry proves `NEW_COMMITS`. This is a freshness notice only: do not widen the requested scope or turn the follow-up into a full review. Repeat the same refetch before preparing any mutation preview.
 
-1. **Lead with the locally-verifiable defect**: the exact behavior at file:line given a concrete input（「`getDestinationLine` 收到 `countries=[]` + `includeRestOfWorld` 就 render『For 0 countries』」）— the reader can confirm it by opening one file, no data-flow trust required.
-2. **Reachability as numbered hops**, each hop with its own file:line, naming every intermediate system explicitly（「① modal 寫入本站 rule → ② server 經 `buildShippingDestination` 建 Shopify discount → ③ Custom reward 頁從 Shopify 抓回 `destinationSelection`」）. When the chain passes through two differently-shaped structures (e.g. the local rule's `countryCodes` vs Shopify's `destinationSelection`), give each structure its own hop and name the conversion between them.
-
-Reason: a compressed cross-system chain reads as the reviewer confusing two structures — the author rejects the whole finding as AI hallucination even when every hop is real, and the indisputable render-site bug sinks with it. Real miss: a finding and its fix were both correct (fix adopted verbatim), but the compressed chain was initially read as「把本站儲存的折扣碼規則和 Shopify 的折扣碼規則混在一起」.
-
-Before rendering the final report, refetch PR details and compare the current source／destination repository UUIDs and full SHA values with `review_input_basis`. Render `source_continuity`, `base_changed`, and `review_context_changed`; list exact new commits when ancestry proves `NEW_COMMITS`. This is a freshness notice only: do not auto-review, remove findings, or change severity. Repeat the same refetch before preparing any mutation preview.
-
-Every verified finding must carry these fields:
-
-```yaml
-finding_uid: "sha256(file path + verbatim anchor + normalized root cause)[:20]"
-display_ordinal: "F-01"
-action: "auto-fix | ask-user | no-op"
-action_reason: "one sentence"
-plain_consequence: "one sentence explaining what visibly breaks or who absorbs the cost"
-```
-
-`finding_uid` is the stable ownership key; `display_ordinal` follows current report order. `plain_consequence` translates the defect into one observable outcome: what the user sees, what stops shipping, or—when runtime is unaffected—which developer／maintenance cost remains. Uncertain classification defaults to `ask-user`. Include this sentence verbatim in the report: `auto-fix 只是處置建議；沒有使用者另行下令，不修改 code、commit、push 或 PR。`
-
-Output in this format (respond in 繁體中文):
-
-```
-# PR #{id} Review · SHA {short_source}
-```
-
-Use that title only when `input_binding: verified`. Otherwise use `# PR #{id} Review` and state `review input 未驗證；不宣稱 Reviewed SHA`.
+Respond in 繁體中文 with only the evidence needed for the requested follow-up:
 
 ```markdown
-review_input_basis:
-source_repo_uuid: "{full source repository UUID}"
-source_sha: "{full reviewed source SHA}"
-destination_repo_uuid: "{full destination repository UUID}"
-destination_sha: "{full reviewed destination SHA}"
-input_binding: "verified | unverified"
-reviewed_at: "{timestamp}"
+## 定點複查結果
 
-| 項目                  | 內容                                                                                        |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| **Author**            | {author}                                                                                    |
-| **Branch**            | `{source}` → `{dest}`                                                                       |
-| **Status**            | {state}                                                                                     |
-| **Review continuity** | {source_continuity}; base_changed={true/false/unknown}; review_context_changed={true/false} |
-| **檔案**              | {file list with +added/-removed}                                                            |
-| **Spec / Plan**       | {spec filename(s) or 「未附」}                                                              |
-
-### Spec 依據
-
-{If spec detected: key goals / non-goals / decisions. Otherwise: 「此 PR 未附 spec／plan 文件」}
-
-### 變更摘要
-
-{Group changes by logical purpose}
-
-### React-doctor 機械掃描
-
-{Only when diffstat contains .jsx/.tsx — one of: (a) new hits as list of rule id + file:line + one-line fix hint, (b)「本次 PR 未引入新問題（既有命中 N 條不計）」, (c)「SKIPPED (<reason>)」. Omit this section entirely for non-React PRs.}
-
-### Review 發現
-
-{List issues found, categorized by severity. For each finding, note whether spec directly addresses it. Cross-boundary / multi-hop findings follow the narrative structure rule at the top of 6e.}
-
-For every finding show `display_ordinal`, severity, summary, `plain_consequence`, `action`, and `action_reason`. Render `plain_consequence` with the label `白話後果` before technical mechanism details. Preserve `finding_uid` in the structured finding metadata used by downstream proposals; do not substitute the display ordinal as the operation ownership key.
-
-`auto-fix 只是處置建議；沒有使用者另行下令，不修改 code、commit、push 或 PR。`
-
-### 總結
-
-{Overall assessment}
+- **目標**: {使用者點名的 finding／留言／作者回覆／diff 位置}
+- **Review input**: source `{full source SHA}` / destination `{full destination SHA}`; input_binding={verified|unverified}
+- **Continuity**: {source_continuity}; base_changed={true|false|unknown}; review_context_changed={true|false}
+- **Verdict**: {成立｜不成立｜部分成立｜證據不足}
+- **證據**: {API 回應、comment、diff 或 source 的精確位置與關鍵內容}
+- **理由**: {一句白話結論}
+- **沒做的部分**: {未查證項目；沒有則寫「無」}
 ```
+
+若使用者要回覆作者或更新 PR，只產生候選文字並接 Step 9；本 skill 不直接 mutation。
 
 ### 7. Fallback: Local Git
 
@@ -292,75 +227,18 @@ If API fails and the branch exists locally, fall back to git diff:
 
 ```bash
 git fetch origin
-git diff origin/{dest}...origin/{source} --stat
-git diff origin/{dest}...origin/{source}
+git cat-file -e "{destination_sha}^{commit}"
+git cat-file -e "{source_sha}^{commit}"
+git diff "{destination_sha}...{source_sha}" --stat
+git diff "{destination_sha}...{source_sha}"
 ```
 
-### 8. Self-Verify（mandatory — 報告成稿後、呈現使用者前）
+`destination_sha` 與 `source_sha` 必須逐字來自 `review_input_basis`。任一 commit 無法取得時回報「證據不足」，不得退回 moving branch ref。
 
-Review 報告（6e）成稿後（成稿 = 內部草稿，此時**不要**先輸出報告文字——harness 對 tool call 之間的文字不保證顯示，verify 的 Agent call 會把先輸出的報告吞掉），派一個 verify subagent 檢查報告是否遵守本 skill 的 gate 規則。這步不可跳過、不可用「報告很簡單」「這次沒 finding」為由省略——零 finding 的報告也要驗（R5/R6 結構規則仍適用）。Verify 回來後接 Step 9 呈現。
+### 8. 呈現
 
-Dispatch 規格：
+把定點複查結果全文放在回合最終訊息；不可寫「結果如上」指涉中段文字。這條路徑不產出正式 review 報告，也不派 Self-Verify auditor。
 
-- `Agent` tool、`subagent_type: skill-verify-auditor`（sonnet+low、tools 僅 Read，定義檔隨本 repo `agents/` 出貨；抽樣品質不足再換更強模型的 judge agent 重跑）
-- description 固定含 marker 字串 `skill-verify:bitbucket-pr-review`（採用率統計 grep 用，不要改字）
-- prompt 內嵌：(1) 完整 review 報告原文 (2) 下方 verify prompt template 全文。不需餵 diff 或 transcript——所有 rubric 都設計成可從報告文本判定
+### 9. Mutation delegation
 
-Verify prompt template（原文嵌入、`{report}` 換成報告全文）：
-
-```
-你是 adversarial 合規審查員，檢查一份 Bitbucket PR review 報告是否遵守其 SKILL.md 的 gate 規則。你的偏置是「找違規」：任一條規則無法從報告文本確認有遵守，判 FAIL，不要善意推定。
-
-報告原文：
-{report}
-
-逐條檢查（每條回 PASS / FAIL / N-A + 一句證據引述）：
-
-R1【6b search-proof】報告中每一個「缺 X / 該處理 Y / 沒 validation / 沒測試 / 重造輪子 / 缺 auth」型 finding，是否都附了搜尋證據鏈（搜了什麼 query + 用什麼工具 + 找到什麼 file:line + 為何 finding 仍成立）？「會 crash / 按了沒反應 / 會 render undefined」型 runtime 斷言 finding，是否都交代了追過哪個周邊機制（form defaultValues / 上層 form native submit / framework 內部行為）且斷言仍成立？缺任一環 = FAIL。報告無此兩型 finding = N-A。
-
-R2【6d-1 hedge 降級】含假設性措辭（「需繞過 UI validation」「假設 API 回 X」「未來如果」「若有人 Y」等同義）的 finding，severity 是否都 ≤ Should Fix？（strict-liability 類豁免：hardcoded secret / SQL injection / eval / unsanitized HTML）
-
-R3【6d-3 repro path + release-blocking】每一個 Must Fix finding 是否 (a) 附具體 user-visible 重現路徑（「到頁面 X、按 Y、觀察到 Z」形式）且 (b) 不修就會壞掉「會出貨的東西」（runtime 行為 / 資料正確性 / build・CI pipeline）？寫不出重現路徑、或後果只是死測試／死 config／文件與 code 不符（不阻擋發布）卻標 Must Fix = FAIL——consensus / cross-axis CONFIRMED 不豁免此檢查。
-
-R4【6c refactor gate】主張「PR 移除 / 削弱了既有保護」的 finding，是否有交代設計意圖查證（引 spec / PR description / commit message 任一層）、或明確改寫成「scope unclear, ask author」？
-
-R5【6a spec 依據】報告是否含 Spec / Plan 欄位與「Spec 依據」段（偵測到 spec 引其內容、否則明寫「此 PR 未附 spec／plan 文件」）？另外：引 spec 段落判 code 違規的 finding，引文所描述的流程是否與被 flag 的 code path 是同一件事（spec 講流程 A、code 是流程 B = FAIL）？
-
-R6【6e 結構】報告是否含完整骨架：資訊表（Author / Branch / Status / 檔案 / Spec）+ 變更摘要 + Review 發現（按 severity 分類）+ 總結，且以繁體中文輸出？
-
-R7【3.1 react-doctor】報告「檔案」欄含 .jsx / .tsx 檔時，是否含「React-doctor 機械掃描」段（新引入命中列表、或「未引入新問題」、或 SKIPPED + 原因，三者擇一）？檔案欄無 .jsx/.tsx = N-A。
-
-R8【6b fix 假設】每個附「建議修法」的 finding，修法中引用的路徑／API／選項行為假設（「把 Y 分支也加上 X」隱含「Y 支援 X」）是否都有驗證痕跡（search-proof／library docs 或 source 引據）、或已把未驗證部分限縮成「需確認 X 是否支援 Y」語式而非斷言？修法夾帶未驗證的行為斷言 = FAIL。報告無任何修法建議 = N-A。
-
-R9【6b 機制鏈＋附屬子句】(a) 因果鏈型 finding（「A 會導致 B 導致 C」）是否對鏈上每一站交代了實際語意（引 file:line 之外還引述該站關鍵 predicate 的行為——filter 濾掉的是什麼、判定函式比較的是 key 還是值）？只引行號不解語意 = FAIL。(b) 主 finding 尾巴掛的 absence 附屬子句（「而且沒地方修」「也沒有 X」）是否同樣附 search-proof、或已改寫成「未確認是否有入口」語式？附屬子句夾帶未驗證的 absence 斷言 = FAIL。報告無此兩型 = N-A。
-
-R10【6e 白話後果】每個 finding 是否都有 `白話後果`，用一句話交代使用者會看到什麼、什麼會停止出貨，或 runtime 不受影響時由誰承擔哪種維護成本？只重述函式名、資料流或技術機制，沒有可理解的結果 = FAIL。報告無 finding = N-A。
-
-輸出格式（固定，最後一行必須是 verdict 行）：
-
-R1: PASS|FAIL|N-A — <一句證據>
-R2: PASS|FAIL|N-A — <一句證據>
-R3: PASS|FAIL|N-A — <一句證據>
-R4: PASS|FAIL|N-A — <一句證據>
-R5: PASS|FAIL — <一句證據>
-R6: PASS|FAIL — <一句證據>
-R7: PASS|FAIL|N-A — <一句證據>
-R8: PASS|FAIL|N-A — <一句證據>
-R9: PASS|FAIL|N-A — <一句證據>
-R10: PASS|FAIL|N-A — <一句證據>
-VERDICT: COMPLIANT | VIOLATIONS: <R 編號逗號列表>
-```
-
-### 9. 呈現（唯一輸出點 — verify 完成後）
-
-完整報告全文放在 verify 之後的**回合最終訊息**輸出（最終訊息 = 後面不再有任何 tool call 的那則，是唯一保證顯示給使用者的位置）。不論 verify 結果如何，最終訊息都必須含報告全文，不可寫「報告如上」指涉中段文字。
-
-按 verify 結果收尾：
-
-- 全 PASS / N-A → 報告末尾附一行「🔎 self-verify: COMPLIANT (10/10)」
-- 任一 FAIL → **先修報告再發**（補 search-proof / 降 severity / 補 repro path），修完不重驗、在報告末尾如實列出「🔎 self-verify 抓到並已修正：R3（xxx finding 原標 Must Fix 無 repro、已降 Should Fix）」
-- Verify subagent 失敗（timeout / error）→ 報告照發、末尾標「🔎 self-verify: SKIPPED (agent error)」，不要靜默省略這行
-
-### 10. Mutation delegation
-
-This skill may prepare structured description／comment candidates, but it never writes them. Before any candidate is previewed, refetch the current PR snapshot and render continuity／base-changed status again. Pass candidates with full reviewed source／destination SHA and stable `finding_uid` values to `bitbucket-pr-mutation`. Only that skill may produce an exact proposal, collect later typed approval, apply allowlisted operations, and report per-operation outcomes.
+This skill may prepare structured description／comment candidates, but it never writes them. Before any candidate is previewed, refetch the current PR snapshot and render continuity／base-changed status again. Pass candidates with full reviewed source／destination SHA to `bitbucket-pr-mutation`. When the target originated from a formal `/pr-review` finding, preserve its stable `finding_uid`; a standalone comment／reply／diff follow-up without a formal finding may omit `finding_uid` because the mutation helper treats it as optional. Only `bitbucket-pr-mutation` may produce an exact proposal, collect later typed approval, apply allowlisted operations, and report per-operation outcomes.
