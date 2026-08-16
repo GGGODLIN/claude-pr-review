@@ -97,6 +97,7 @@ Calibration entries record how this author historically responds to review findi
 - `PR_DESTINATION_SHA` = full destination commit SHA：`destination.commit.hash`（Bitbucket）／base commit OID（GitHub）
 - `SOURCE_REPO_UUID`／`DESTINATION_REPO_UUID` = Bitbucket source／destination repository UUID；GitHub 分別使用 `headRepository.id` 與 `gh repo view` 的 destination repository `id`
 - `BASE_BRANCH` = destination/base branch name
+- `TRUNK_BRANCH` = repo 主幹名：`git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||'`，解析不到就用 `master`——2.55 provenance 與 C4 authored-hunk 推導一律引用它、不硬編 master
 - `PR_ID` = PR number / id
 
 ### 2.5.1 Fetch + sanity check
@@ -142,7 +143,7 @@ grep -n "foo" "$REVIEW_ROOT/src/server/handlers.ts"
 ### 2.5.4 Caveats
 
 - **PR 改 deps**（package.json / yarn.lock / Cargo.toml / requirements.txt 等）：worktree node_modules symlink 是主 repo 版本、跟 PR 期望不一致；純讀 code review OK，要實跑 test / build → 在 worktree 內 `yarn install` 一次
-- **GitHub fork PR**：head branch 不在 origin、用 `gh pr checkout --detach <num>` 進主 repo 拿到 commit 後 `git worktree add --detach "$REVIEW_ROOT" HEAD`；或 `gh pr view --json headRepository` 取 fork URL 加 remote
+- **GitHub fork PR**：head branch 不在 origin——**不要在主 repo checkout**（會動主 repo HEAD、違反本步隔離初衷）：`git fetch origin "refs/pull/<num>/head"` 後 `git worktree add --detach "$REVIEW_ROOT" FETCH_HEAD`（FETCH_HEAD 必須等於 `PR_HEAD`、不等則 `input_binding: unverified`）；或 `gh pr view --json headRepository` 取 fork URL 加 remote 再 fetch
 - **同 branch 已掛在另一個 worktree**（user 自己正在 dev 這條 branch + 又要 review 同一個 PR）：用 detached HEAD 繞開 `git worktree add --detach "$REVIEW_ROOT" "$LOCAL_HEAD"`
 - **Cleanup 在 Step 7**：寫進 task list 提醒收尾，不要這時 remove
 
@@ -157,10 +158,10 @@ grep -n "foo" "$REVIEW_ROOT/src/server/handlers.ts"
 **Trigger**：`BASE_BRANCH` 不是 master / main（典型情境 = hotfix branch 從 default branch 切、PR 打 staging / pre-production base）。base 是 master 的一般 PR → 跳過本步、報告 header 標「provenance: N-A（base = master）」。
 
 ```bash
-git fetch origin master --quiet
-# 逐檔判定：與 origin/master 上該檔的 PR-branch 差異為空 = inherited
-for f in <F 的每個檔>; do
-  if git diff --quiet origin/master "origin/$PR_BRANCH" -- "$f"; then
+git fetch origin "$TRUNK_BRANCH" --quiet
+# 逐檔判定：與 origin/$TRUNK_BRANCH 上該檔的 PR-branch 差異為空 = inherited
+for f in <Step 2 diffstat 的每個變更檔（與 2.95 的 F 同源；此時 F 尚未正式建立）>; do
+  if git diff --quiet "origin/$TRUNK_BRANCH" "origin/$PR_BRANCH" -- "$f"; then
     echo "inherited: $f"    # master 內容流向 base、已在原 PR 審過
   else
     echo "authored: $f"     # 本 PR 真正的變更
@@ -194,7 +195,7 @@ Explicitly NOT specs: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE.m
 
 1. Read the full content of each detected spec (use `gh api` or local `git show` depending on platform)
 2. If total spec content > ~8000 tokens, summarize before passing to reviewers (keep goals, non-goals, decisions, constraints — drop prose)
-3. Pass to both Opus and Codex in Step 3
+3. Transport 分軌傳遞：Opus reviewers 與 Gemini prompt 直接內嵌 spec content；bare Codex 收不了 prompt 注入、只看得到 checkout 內的 spec 檔（細則見 Codex 段「intentionally kept diff-only」）——外部 spec 脈絡由 Step 4 驗證吸收
 4. Surface in Step 5 report under 「Spec 依據」section
 5. **Spec 作者同人檢查**：`git log --format='%an' origin/$PR_BRANCH -- <spec paths> | sort -u` 比對 PR 作者。同人 → 記下來、Step 5「Spec 依據」段必須標注「⚠️ spec 作者 = PR 作者」。為什麼：spec 是 out-of-scope / OUT_OF_SCOPE 判定的 ground truth，但作者自寫的 spec 可以給自己的實作縮水免罪——審報告的人有權看到這層利益重疊再決定信多少（判定本身不變，只是揭露）
 
@@ -356,7 +357,7 @@ Compute two numbers from F and the diff:
 **Threshold: chunk when `FILE_COUNT > 15` OR `DIFF_LINES > 800`.**
 
 - **Below threshold** → single dispatch, primary reviewer reviews all of F at once (Step 3 unchanged).
-- **At/above threshold** → deterministically partition F's source files into chunks of ≤ 15 files (and roughly ≤ 800 diff-lines each). Partition is **stable and exhaustive**: sort file paths, fill chunks in order, every file lands in exactly one chunk. Record the chunk→files map — Step 3 dispatches the primary reviewer once per chunk, and Step 4.5 asserts the union equals F.
+- **Above threshold** → deterministically partition **all of F**——含 lockfiles／generated／vendored（它們也要有 chunk owner、才有人對其輸出 `INTENTIONALLY_SKIPPED` accounting；門檻計算仍只數 source files。修：舊寫法只切 source files、非 source 檔在 chunked PR 無人認領必落 MISSED）——into chunks of ≤ 15 source files (and roughly ≤ 800 diff-lines each). Partition is **stable and exhaustive**: sort file paths, fill chunks in order, every file lands in exactly one chunk. Record the chunk→files map — Step 3 dispatches the primary reviewer once per chunk, and Step 4.5 asserts the union equals F.
 
 ## Step 2.96: Gemini Pro opt-in（Flash 已升永久軸、每次跑）
 
@@ -496,7 +497,7 @@ Run alongside the primary reviewer when the PR touches the corresponding surface
   - Changes to permission / role / RBAC code
 
 - **`spec-compliance-reviewer`** — trigger only when Step 2.65 records `gate=ELIGIBLE`:
-  - Re-run the Step 2.65 same-flow test against authoritative F, the final chunk map, and hunk-level provenance immediately before dispatch. For base ≠ master, derive C4 authored line ranges from `git diff --unified=0 origin/master origin/$PR_BRANCH`; otherwise use `origin/$BASE_BRANCH` → `origin/$PR_BRANCH`. A C4 code anchor must fall inside an authored hunk; `missing_in_code` must point to the nearest authored anchor in that same changed flow. File-level authored/inherited labels alone are insufficient. Re-read every canonical spec quote and require its reducer-returned line range and source hash to remain identical.
+  - Re-run the Step 2.65 same-flow test against authoritative F, the final chunk map, and hunk-level provenance immediately before dispatch. For base ≠ trunk, derive C4 authored line ranges from `git diff --unified=0 origin/$TRUNK_BRANCH origin/$PR_BRANCH`; otherwise use `origin/$BASE_BRANCH` → `origin/$PR_BRANCH`. A C4 code anchor must fall inside an authored hunk; `missing_in_code` must point to the nearest authored anchor in that same changed flow. File-level authored/inherited labels alone are insufficient. Re-read every canonical spec quote and require its reducer-returned line range and source hash to remain identical.
   - Dispatch exactly one non-chunked, `tools: []` reviewer for the whole PR after F, hunk-level provenance, and the chunk map exist; no retry replacement after failure.
   - Main session creates a unique random `dispatch_id` and builds a trusted read-only JSON packet containing that ID plus `clauses`, `spec_files`, `changed_files`, `evidence_bindings`, `trace_context`, and `predispatch_verification`. Each binding has a stable `C4-BIND-NNN` ID, `side=head|base`, path, line range, exact quote, and SHA-256 of that quote. Head-side entries are prepared from `review_head:path`, not mutable worktree bytes. For an authored deletion or rename-old side, bind the entry to `provenance_base_tree`, `old_path`, `blob_oid`, `content_hash`, `blob_size_bytes`, and line range; `provenance_base_tree^{tree}` must equal `authored_diff_base^{tree}`. Run `git cat-file -s <C4 provenance base>:<old path>` before reading and skip C4 with `C4_BASE_BLOB_TOO_LARGE` when the blob exceeds 120,000 bytes; otherwise extract only the deleted hunk plus bounded surrounding context from that bound base-side blob. Never materialize an over-limit blob, and do not require a removed leaf to exist at PR HEAD. Include only the canonical clause inventory, verbatim surrounding spec excerpts, F/provenance metadata, clause-relevant authored diff hunks, surrounding code context, and directly connected guards needed for the trace.
   - `trace_context.authored_diff_binding_ids` must reference bindings on authored changed-file paths. `trace_context.clause_traces` has exactly one row per clause and lists that clause's required authored binding IDs plus every directly connected guard binding ID needed to establish reachability; a finding must copy the whole per-clause set, not choose a convenient subset. The global authored/guard ID sets must equal the unions of those rows. Supply connected guards when needed, otherwise state `connected_guard_status=NONE_REQUIRED`. `predispatch_verification` records canonical spec binding, verified head bindings, base binding status, and hunk provenance; these are diagnostic assertions only—the reducer independently verifies them against `binding_context.authored_diff_base` → `binding_context.review_head` Git hunks.
@@ -860,14 +861,19 @@ PR context (use this for "out of scope" judgement):
 - Spec / plan attached (if any): <verbatim content if ≤ 8k tokens, else summary; if none: "no spec attached">
 ```
 
-**並行 dispatch、用 `parallel` Agent tool calls**（同 Opus 軸多 reviewer parallel pattern）：
+**並行 dispatch——每軸啟動與等待都以 `$EXTRA_AXES` 成員為 guard**（修：舊啟動塊無條件雙軸、與選擇狀態脫鉤；報告的 Gemini 軸欄位以實際啟動的軸為準、不對選擇文字二次解讀）：
 
 ```bash
-(agy --print="$PRO_PROMPT" --model="Gemini 3.1 Pro (High)" --dangerously-skip-permissions --add-dir "$REVIEW_ROOT" --print-timeout 10m </dev/null > /tmp/agy-pro-output.txt 2>&1) &
-PRO_PID=$!
-(agy --print="$FLASH_PROMPT" --model="Gemini 3.6 Flash (High)" --dangerously-skip-permissions --add-dir "$REVIEW_ROOT" --print-timeout 10m </dev/null > /tmp/agy-flash-output.txt 2>&1) &
-FLASH_PID=$!
-wait $PRO_PID $FLASH_PID
+PIDS=""
+case ",$EXTRA_AXES," in *,pro,*)
+  (agy --print="$PRO_PROMPT" --model="Gemini 3.1 Pro (High)" --dangerously-skip-permissions --add-dir "$REVIEW_ROOT" --print-timeout 10m </dev/null > /tmp/agy-pro-output.txt 2>&1) &
+  PIDS="$PIDS $!" ;;
+esac
+case ",$EXTRA_AXES," in *,flash,*)
+  (agy --print="$FLASH_PROMPT" --model="Gemini 3.6 Flash (High)" --dangerously-skip-permissions --add-dir "$REVIEW_ROOT" --print-timeout 10m </dev/null > /tmp/agy-flash-output.txt 2>&1) &
+  PIDS="$PIDS $!" ;;
+esac
+[ -n "$PIDS" ] && wait $PIDS
 ```
 
 **Parse 兩階段 fallback**：
@@ -894,6 +900,8 @@ wait $PRO_PID $FLASH_PID
 ## Step 4: Cross-Axis Verification Pass
 
 **Trigger**: only after ALL Step 3 reviews (Opus first-pass + Codex 中性 + Codex 對抗 + agy 軸 if `$EXTRA_AXES` non-empty) have returned.
+
+**執行順序（修「repair-round finding 繞過驗證管線」的洞）**：Step 3 全軸回來後，**先跑 Step 4.5 coverage assertion（含至多一輪 repair re-dispatch）**，repair 產生的新 finding 併入 primary bucket、凍結完整集合，然後才 4.1／4.2 → 4.3 → 4.6。任何 finding 都必須走過同一條驗證管線——4.1/4.2/4.3 之後不得再新增 finding。
 
 **Two symmetric sub-passes**：借鑑 Cloudflare security-audit-skill「找的 agent 不准自己驗」原則。Step 3 任何軸抓的 finding 都不由同軸自己驗——交給另一軸 cross-check：
 
@@ -989,7 +997,7 @@ grep -q "Thread ready" "$VLOG" || head -10 "$VLOG"  # 起不來就看死因
 ~/.claude/scripts/poll-liveness.sh poll \
   --pgrep "codex-companion.mjs" --success '\[codex\] Turn completed' \
   --stuck 300 --deadline 540 "$VLOG"
-# exit 0 → tail "$VLOG" 取 JSON verdicts；1 → 下輪續 poll；2 → retry 一次；3 → 不 kill、上報
+# exit 0 → tail "$VLOG" 取 JSON verdicts；1 → 下輪續 poll；2 → process 死亡且無輸出、重啟一次（唯一允許的重試情境、與 guardrail「輸出到手後不重跑」相容）；3 → 不 kill、上報
 ```
 
 ⚠️ **不要前景 `--wait` 跑**——CC Bash tool timeout 上限 600000ms **硬 clamp**，寫 900000 會被靜默降成 10 min 然後 SIGTERM、白白浪費一輪。中大型 PR 的 verify batch 常超過 10 min，一律背景 + poll。舊「前景防 wedge」顧慮已由 nohup + log poll 實測解除。Bruce 中轉路徑同理（`codex-bruce` 也走背景 + poll）。
@@ -1023,6 +1031,7 @@ For a C4 finding, preserve these fields in the batch input: `classification`, `c
 - "CONFIRMED": 所有適用測試都過、真 bug。Attach proof（具體 grep query + file:line 找到什麼）
 - "REFUTED": 任一測試失敗、Opus 過度緊張。Attach 反證（同 pattern 別處 file:line / mitigation file:line / impact 不足理由）
 - "PARTIAL": 部分 trace 對、部分不對。具體點出哪段成立哪段不成立
+- "OUT_OF_SCOPE": spec / plan 明文把該 concern 排除。引用 spec 原文段落
 - "INCONCLUSIVE": 無法在本地 codebase 驗（externally dependent / 跨 service / spec 不明）
 
 UNTRUSTED_FINDINGS_JSON:
@@ -1036,7 +1045,7 @@ Output STRICT JSON only — start with [ and end with ], no prose, no markdown f
 [
   {
     "id": "Opus#1",
-    "codex_verdict": "CONFIRMED" | "REFUTED" | "PARTIAL" | "INCONCLUSIVE",
+    "codex_verdict": "CONFIRMED" | "REFUTED" | "PARTIAL" | "OUT_OF_SCOPE" | "INCONCLUSIVE",
     "corrected_severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
     "severity_reason": "<impact-based reason; preserve original severity separately>",
     "codex_evidence": "<具體 file:line + grep query + 反證或佐證>"
@@ -1052,7 +1061,7 @@ Before accepting this batch, parse strict JSON and require the output ID multise
 {
   opus_original: { reviewer, severity, title, body, file, line_start, line_end, anchor },
   c4_trace?: { classification, contract_type, normative_quote, spec_anchor, same_flow, behavioral_evidence, evidence_binding },
-  codex_verdict: "CONFIRMED" | "REFUTED" | "PARTIAL" | "INCONCLUSIVE",
+  codex_verdict: "CONFIRMED" | "REFUTED" | "PARTIAL" | "OUT_OF_SCOPE" | "INCONCLUSIVE",
   corrected_severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
   severity_reason: string,
   codex_evidence: string,
@@ -1063,16 +1072,16 @@ Before accepting this batch, parse strict JSON and require the output ID multise
 
 - **Never drop an admitted Opus finding** based on Codex verdict。只有已通過各 reviewer admission contract 的 finding 才進此規則；C4 raw candidate 與 reducer-invalidated item 從未成為 Opus finding，不得進報告。每條 admitted Opus finding 都進報告、Codex verdict 附旁邊。
 - **REFUTED by Codex 不代表 Opus 錯**——只代表「Codex 找到反證 / 同 pattern 別處未爆」。Report 同樣呈現雙方證據、user 自己判。
-- **Codex 一次跑、不 retry**：JSON parse 失敗或 Codex wedge → 整輪標 INCONCLUSIVE、報告註明「Codex verify pass 失敗」、不阻斷整個 review（同 Gemini parse-fail 降級邏輯）。
+- **輸出到手後不重跑**（措辭統一）：JSON parse 失敗、ID 集不符或 wedge → 整輪標 INCONCLUSIVE、報告註明「Codex verify pass 失敗」、不重跑修輸出、不阻斷整個 review（同 Gemini parse-fail 降級邏輯）。唯一允許的重試是 poll 段的「process 死亡且無輸出 → 重啟一次」。
 - **Strict-liability Opus findings 跳過**（同 Step 4.1），但 `[spec-compliance-reviewer]` finding 不適用此豁免。
 - **C4 deterministic re-check remains authoritative**：Codex output cannot repair a missing or mismatched clause/code anchor. Before using a C4 verdict, rerun `pr-review-c4.py validate` with the original packet, raw reviewer candidate, unchanged runtime input, and current review root. The reducer—not main session—re-reads the canonical clause and head bindings from the immutable `review_head` Git object, requires every base binding tree to equal `authored_diff_base^{tree}`, verifies same-flow and authored-anchor offsets, and automatically invalidates any finding whose hash/range/provenance evidence is stale. Main session cannot submit a finding ID or reason as a kill list. Same-flow, behavioral-delta, impact, or Codex disagreements that pass deterministic validation remain visible as admitted-finding verification verdicts under the general transparency rule. Human-facing report data must come only from the replacement `human_projection`: reducer-invalidated content gets no row, title, severity, quote, anchor, impact, fix, action item, inline comment, PR comment, summary sentence, or mutation operation. If a merged finding has another surviving source, remove only the C4 tag and C4-derived prose, then route the remaining source through its applicable verification path.
 - **Severity is separate from validity**：use `corrected_severity` for Step 5 prioritization while preserving the original reviewer severity and `severity_reason` in the report.
 
-  4.1 + 4.2 都回來後，接 Step 4.3（consensus 條與 lone finding 的補充複查），再進 4.5。
+  4.1 + 4.2 都回來後，接 Step 4.3（consensus 條與 lone finding 的補充複查），再進 4.6（4.5 已在 4.1/4.2 之前完成、見 Step 4 執行順序）。
 
 ## Step 4.3: Consensus Baseline Check + Lone-Finding 判斷
 
-**Why**：Step 4.1/4.2 的 consensus 豁免修補 + 舊 6d-2 機械降級的替代。兩個子檢查都輕量、可以合併派一個 `code-reviewer` subagent 批次跑（不佔 codex runtime、與 4.5/4.6 無依賴可並行）。
+**Why**：Step 4.1/4.2 的 consensus 豁免修補 + 舊 6d-2 機械降級的替代。兩個子檢查都輕量、可以合併派一個 `code-reviewer` subagent 批次跑（不佔 codex runtime、與 4.6 無依賴可並行；4.5 已在本步之前完成）。
 
 ### 4.3a Consensus findings — 輕量 baseline check
 
@@ -1095,11 +1104,11 @@ Output per finding：`baseline: 慣例支持 / 慣例衝突 / 無先例` + `scop
 3. Verdict 是 **PARTIAL / INCONCLUSIVE** 且解釋不出他軸為何漏 → 這時「多軸沉默 + 驗證不確定」才構成降級理由，從 `effective_severity` 降一級並把兩個理由都寫進備註。
 4. 判斷困難（機制複雜 / 證據兩可）→ 併進 4.3 的 subagent 批次，讓它專門回答「其他 N 軸都走過同一份 diff 為什麼沒 flag？合理解釋 or 反證？」再依 2/3 處理。
 
-完成 4.3 後接 Step 4.5。
+完成 4.3 後接 Step 4.6（4.5 已在 4.1/4.2 之前完成、見 Step 4 執行順序）。
 
-## Step 4.5: Coverage Assertion (ENH-A)
+## Step 4.5: Coverage Assertion (ENH-A) — 執行時點在 4.1/4.2 之前
 
-After all Opus reviewer instances return, verify deterministically that **every file in F (Step 2.95) was accounted for**.
+After all Opus reviewer instances return（Step 3 一回來就跑、先於 4.1/4.2），verify deterministically that **every file in F (Step 2.95) was accounted for**. Repair 輪產生的新 finding 併入 primary bucket，照常走 4.1/4.2/4.3/4.6。
 
 1. Collect the union only from primary reviewer instances: their finding locations, `REVIEWED_NO_ISSUES`, and `INTENTIONALLY_SKIPPED` lines. Exclude every domain reviewer from coverage arithmetic, including all `spec-compliance-reviewer` findings and accounting arrays.
 2. Compute `MISSED = F − accounted`.
@@ -1396,7 +1405,7 @@ Weighted by verification verdict, but **all Codex findings are still shown below
 
 ### Should Fix（強烈建議）
 
-- Opus first-pass HIGH findings **而 Codex verdict 非 REFUTED**（CONFIRMED / PARTIAL / INCONCLUSIVE / SKIPPED 都列）
+- Opus first-pass HIGH findings **而 Codex verdict 非 REFUTED／OUT_OF_SCOPE**（CONFIRMED / PARTIAL / INCONCLUSIVE / SKIPPED 都列）
 - Opus PARTIAL verifications of Codex (some paths covered, gap remains)
 - Codex PARTIAL verifications of Opus (4.2)
 - Codex HIGH that Opus couldn't verify (INCONCLUSIVE)
@@ -1413,8 +1422,9 @@ Weighted by verification verdict, but **all Codex findings are still shown below
 - **Codex first-pass finding 被 Opus 標 REFUTED / OUT_OF_SCOPE**（4.1）
   - REFUTED format: `Codex 擔心 X → Opus 於 file:line 找到現有處理 Y → 使用者自行判斷是否採納 Codex 的顧慮`
   - OUT_OF_SCOPE format: `Codex 擔心 X → spec 明確標為 non-goal（引用 spec 段落）→ 如 scope 應擴大、使用者自行決定`
-- **Opus first-pass finding 被 Codex 標 REFUTED**（4.2）
-  - format: `Opus [reviewer] 擔心 X → Codex 於 file:line 找到同 pattern 平行未爆 / mitigation 已存在 / impact 不足 → 使用者自行判斷是否採納 Opus 的顧慮`
+- **Opus first-pass finding 被 Codex 標 REFUTED / OUT_OF_SCOPE**（4.2）
+  - REFUTED format: `Opus [reviewer] 擔心 X → Codex 於 file:line 找到同 pattern 平行未爆 / mitigation 已存在 / impact 不足 → 使用者自行判斷是否採納 Opus 的顧慮`
+  - OUT_OF_SCOPE format: `Opus [reviewer] 擔心 X → spec 明文排除（引用段落）→ 如 scope 應擴大、使用者自行決定`
   - **不要當作「Opus 錯了」呈現**——只是 cross-axis 找到反證、user 看雙方證據自己判
 
 ## 審查工具比較 (qualitative)
@@ -1423,7 +1433,7 @@ Weighted by verification verdict, but **all Codex findings are still shown below
 - Codex 中性視角: diff-only, 善於從 diff 本身語感找 smell
 - 兩者重疊率: X% (consensus 筆數 / 總 finding 數)
 - Opus 複查 Codex 的結果分佈 (4.1): CONFIRMED N, REFUTED M, PARTIAL K, INCONCLUSIVE L
-- **Codex 複查 Opus 的結果分佈 (4.2、對稱化)**: CONFIRMED N, REFUTED M, PARTIAL K, INCONCLUSIVE L
+- **Codex 複查 Opus 的結果分佈 (4.2、對稱化)**: CONFIRMED N, REFUTED M, PARTIAL K, OUT_OF_SCOPE O, INCONCLUSIVE L
   - **REFUTED 率高**（> 30%）= Opus 在這個 PR over-flag 嚴重、user 看「參考用」段 Opus 條目時可下調權重
   - **REFUTED 率低**（< 10%）= Opus first-pass 命中率高、Must Fix / Should Fix 可放心採納
 - **對抗式第三軸增益**: 對抗式獨有（中性 Codex + Opus 都沒 flag）且 Opus 複查 CONFIRMED 的 finding 數 = 紅隊軸對本 PR 的差異化價值。本 PR：**N 個獨有 CONFIRMED** / M 個對抗式總 findings（REFUTED K）
@@ -1498,8 +1508,8 @@ fi
 git worktree remove "$REVIEW_ROOT"
 # 若 codex / sem 留下 .DS_Store 等 untracked → 加 --force
 git worktree remove --force "$REVIEW_ROOT" 2>/dev/null || true
-# 確認移除
-git worktree list | grep -v "$REVIEW_ROOT" >/dev/null && echo "✓ worktree cleaned up"
+# 確認移除——驗「目標不存在」、不是驗「別行存在」（舊寫法 grep -v 只要主 worktree 在就恆真、移除失敗也印 ✓）
+git worktree list --porcelain | grep -qx "worktree $REVIEW_ROOT" && echo "⚠️ worktree 仍在、remove 失敗" || echo "✓ worktree cleaned up"
 ```
 
 **不要 skip 這兩步**：
