@@ -6,6 +6,7 @@ model: opus
 effort: xhigh
 ---
 
+<!-- intentional-zero-tools -->
 <!-- Contract-tested by commands/tests/test_pr_review_c4_dispatch_contract.py — run it after editing this file. -->
 
 # Spec Compliance Reviewer

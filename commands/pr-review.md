@@ -5,10 +5,11 @@ argument-hint: "<PR-URL-or-number>"
 
 # PR Review
 
-> ⚠️ **本檔在契約測試底下**：`skills/bitbucket-pr-mutation/scripts/tests/test_no_raw_bitbucket_writes.py` 會讀 Step 8，斷言步驟 marker 的順序與 tier 保證句；`commands/tests/test_pr_review_report_projection_contract.py` 會讀 Step 5–6，斷言雙層報告投影接線；`commands/tests/test_pr_review_c4_dispatch_contract.py` 會讀 C4 派工段，斷言 prepared marker 接線與人工 prompt 退役。改動對應段落後三套都要跑。
+> ⚠️ **本檔在契約測試底下**：`skills/bitbucket-pr-mutation/scripts/tests/test_no_raw_bitbucket_writes.py` 會讀 Step 8，斷言步驟 marker 的順序與 tier 保證句；`commands/tests/test_pr_review_report_projection_contract.py` 會讀 Step 5–6，斷言雙層報告投影接線；`commands/tests/test_pr_review_c4_dispatch_contract.py` 會讀 C4 派工段，斷言 prepared marker 接線與人工 prompt 退役；`commands/tests/test_pr_review_self_verify_contract.py` 會讀 Step 6，斷言 Self-Verify 接線與 advisory 行為。改動對應段落後四套都要跑。
 > `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q`
 > `python3 commands/tests/test_pr_review_report_projection_contract.py`
 > `python3 commands/tests/test_pr_review_c4_dispatch_contract.py`
+> `python3 commands/tests/test_pr_review_self_verify_contract.py`
 
 Orchestrate a multi-axis code review (CC context-aware + Codex neutral & adversarial + Gemini Flash permanent axis; Gemini Pro opt-in) for a pull request and produce a Traditional Chinese comparison report.
 
@@ -178,7 +179,7 @@ done
 
 ## Step 2.6: Detect Spec / Plan Docs in PR
 
-PRs produced via Superpowers workflow (brainstorming → writing-plans → executing-plans) often include a markdown spec/plan/design doc that states intent, scope, and explicit non-goals. Reviewers should use these as ground truth for "what this PR is supposed to do" before flagging "missing X" or "should also handle Y" — the spec may explicitly rule something out of scope.
+PRs produced via spec/plan-driven workflows often include a markdown spec/plan/design doc that states intent, scope, and explicit non-goals. Reviewers should use these as ground truth for "what this PR is supposed to do" before flagging "missing X" or "should also handle Y" — the spec may explicitly rule something out of scope.
 
 ### Detection heuristic
 
@@ -186,7 +187,7 @@ From the PR's changed-file list, flag a `.md` file as a spec if ANY of:
 
 - Path contains `/specs/`, `/plans/`, `/brainstorm/`, `/design/`, `/proposals/`, `.claude/plans/`
 - Filename matches `*-spec.md`, `*-plan.md`, `*-design.md`, `*-brainstorm.md`, `*-requirements.md`, `*-proposal.md`
-- Filename looks like `YYYY-MM-DD-*.md` (common Superpowers plan naming)
+- Filename looks like `YYYY-MM-DD-*.md` (common date-prefixed plan naming)
 - File starts with frontmatter containing `type: plan` / `type: spec` / `type: design` / `phase:` / `goals:` / `non_goals:`
 
 Explicitly NOT specs: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`.
@@ -220,7 +221,7 @@ Before a candidate can enter the clause inventory, pass it through the determini
 printf '%s' "$C4_AUTHORITY_INPUT_JSON" | python3 ~/.claude/scripts/pr-review-c4.py resolve-authority > "$C4_AUTHORITY_OUTPUT_JSON"
 ```
 
-`C4_AUTHORITY_INPUT_JSON` contains `review_root=$REVIEW_ROOT` and one candidate with one contiguous exact quote, source excerpt, path, line range, contract type, and changed-flow hint. Split separated normative sentences into separate clause IDs; never join non-contiguous quotes with `/` or prose. Only `status=RESOLVED` may continue. A current spec keeps its verified path; `openspec/changes/archive/**` is an alias only and must resolve from its complete `### Requirement:` block to exactly one byte-identical block under `openspec/specs/**`. Use the reducer-returned canonical path, line range, source excerpt, and source hash in every downstream structure. Zero live matches, multiple live matches, a non-unique canonical quote, a stale line anchor, a missing path, or a root escape finalizes that candidate with the reducer's stable reason code. If no candidate survives, finalize `SKIPPED`; never dispatch from an archived alias or from main-session inference that a change was probably promoted.
+`C4_AUTHORITY_INPUT_JSON` contains `review_root=$REVIEW_ROOT` and one candidate with one contiguous exact quote, source excerpt, path, line range, contract type, and changed-flow hint. Split separated normative sentences into separate clause IDs; never join non-contiguous quotes with `/` or prose. Only `status=RESOLVED` may continue. A current spec keeps its verified path; unpromoted `openspec/changes/<name>/specs/**` delta specs are also accepted as authority and keep their own verified path (reason `C4_CHANGE_DELTA_AUTHORITY_RESOLVED`), and the report's 「Spec 依據」 must state that the authority is an unpromoted change delta authored inside the PR when that is the case; `openspec/changes/archive/**` is an alias only and must resolve from its complete `### Requirement:` block to exactly one byte-identical block under `openspec/specs/**`. Use the reducer-returned canonical path, line range, source excerpt, and source hash in every downstream structure. Zero live matches, multiple live matches, a non-unique canonical quote, a stale line anchor, a missing path, or a root escape finalizes that candidate with the reducer's stable reason code. If no candidate survives, finalize `SKIPPED`; never dispatch from an archived alias or from main-session inference that a change was probably promoted.
 
 Build a clause inventory before Step 3:
 
@@ -417,7 +418,9 @@ Step 3 dispatch 前先問 user：「這個 PR 走哪個 Codex preset？」——
 
 Wall-clock 估為序列時代數字；兩軸改並行（見第三軸段）後 ≈ max(中性, 對抗)——default 實測中性 12:37 / 對抗 7:26、無 wedge 時整體約 13-15 min。ultra preset 注意：Step 4.2 verify batch 起跑前把 config effort sed 回 xhigh（verify 是 per-finding 對表、不需要委派模式、省 subagent 帳）；對抗軸 token 帳只看得到母 thread（sqlite auto_compact scope）、subagent thread 無現成記錄。
 
-**無人值守（/goal 等）或 user 無回應** → 走 **default**、不 block。走預設時報告 header「Codex preset」行註明「按預設 default」。
+**加選軸（與 preset 正交，問 preset 的同一則訊息一併列出）**：「要不要加跑 web 前沿模型對抗軸？」——需要一條能把 prompt 送進訂閱制 web chat 介面的 CLI 橋接（非必備；沒有就跳過這個問題）。點頭 → Step 3 兩軸起跑的同時非同步射出同一份對抗 review 指令＋diff，合成前把結果收回，findings 標 `[web-Pro]`、**不與 Codex 軸合併**，並在報告註明該軸的 wall-clock。
+
+**無人值守（/goal 等）或 user 無回應** → 走 **default**、不 block、**加選軸不加**。走預設時報告 header「Codex preset」行註明「按預設 default」。
 
 **Per-PR override**：user 在 prompt 內明講（如「這次跳對抗軸」/「這次中性只跑 Terra」）→ main session 聽從、報告註明；**不寫進 preset 永久結構**。
 
@@ -1464,7 +1467,7 @@ Before final report output, refetch the current PR source／destination reposito
 3. 嚴格驗證 auditor 輸出後再解析 verdict：必須恰好含 R1–R10 各一行、順序固定、每行狀態只能是 rubric 允許的 PASS／FAIL／N-A，且最後恰好一行 verdict。任一 R 行為 FAIL 時 verdict 必須列出完全相同的 R 編號集合；所有 R 行皆 PASS／N-A 時 verdict 才能是 `VERDICT: COMPLIANT`。缺行、重複、順序錯、狀態不合法、FAIL 集合不一致、只有 verdict 無逐條證據，全部視為格式錯誤，不得只信最後一行。
    - 完整且一致的 `VERDICT: COMPLIANT` → 接發布。
    - 完整且一致的 `VERDICT: VIOLATIONS: ...` → 逐條查現有產物；有執行證據就補寫，沒有執行證據就補跑對應關卡，再把證據寫回同一份 draft。修正後不重派 auditor；在「沒做的部分（結案對帳）」列出抓到與已修正項目，並明寫「未經第二次獨立稽查」。只有所有違規已實際修正才可接發布。
-   - timeout、空輸出、上述格式錯誤或 agent error → 記錄 `Self-Verify: BLOCKED (agent error)`，保留且不得消耗 draft，不得執行投影 helper；停止發布但跳至 Step 7 cleanup，還原 Codex config、清理或依既有例外保留 worktree，cleanup 完成後才回報 blocked。
+   - timeout、空輸出、上述格式錯誤或 agent error → 記錄 `Self-Verify: SKIPPED (agent error)`，**照常執行投影 helper 發布**（advisory：Self-Verify 執行失敗只註記不阻斷、不重派 auditor），並在「沒做的部分（結案對帳）」列明「Self-Verify 未執行（agent error）、本報告未經獨立稽查」。
 4. 執行 `python3 ~/.claude/scripts/pr-review-report-projection.py <repo-root>/pr-<number>-review.audit.draft.md <repo-root>/pr-<number>-review.audit.md <repo-root>/pr-<number>-review.md`。helper 在同一把鎖內驗證 draft，並成對發布完整證據副檔與拍板主報告；成功後會消耗 draft。helper 非 0 結束就視為發布失敗，不得手工補寫任一報告；程序若中途中止，重新執行同一指令即可復原 claim 後重跑。
 5. 發布成功後，`<repo-root>/pr-<number>-review.audit.md` 是唯一權威來源；對話只呈現 `<repo-root>/pr-<number>-review.md` 的拍板內容，並附兩個可點擊檔案連結。
 

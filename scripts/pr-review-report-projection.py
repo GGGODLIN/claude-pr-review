@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -1010,6 +1011,24 @@ def claim_draft(draft_path):
   return claim_directory, claimed_path
 
 
+def assert_safe_claimed_path(path):
+  claim_directory = path.parent
+  if claim_directory.is_symlink():
+    raise ValueError("claim directory must not be a symbolic link")
+  directory_metadata = claim_directory.stat()
+  if directory_metadata.st_uid != os.getuid() or not stat.S_ISDIR(directory_metadata.st_mode):
+    raise ValueError("claim directory must be owned by the current user")
+  if path.is_symlink():
+    raise ValueError("claimed draft must not be symbolic links")
+  metadata = path.stat()
+  if (
+    metadata.st_uid != os.getuid()
+    or not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_nlink != 1
+  ):
+    raise ValueError("claimed draft must be a single-link regular file")
+
+
 def recover_claimed_draft(draft_path):
   claims = sorted(draft_path.parent.glob(f".{draft_path.name}.claim.*/draft.md"))
   if not claims:
@@ -1018,6 +1037,7 @@ def recover_claimed_draft(draft_path):
     raise ValueError("ambiguous interrupted draft claim")
   claimed_path = claims[0]
   claim_directory = claimed_path.parent
+  assert_safe_claimed_path(claimed_path)
   claimed_path.replace(draft_path)
   claim_directory.rmdir()
 

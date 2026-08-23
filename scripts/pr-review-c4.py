@@ -43,6 +43,7 @@ FINDING_CLASSIFICATIONS = {
   "code_weaker_than_spec",
   "undocumented_behavior",
 }
+CHANGE_DELTA_SPEC_PATTERN = r"openspec/changes/(?!archive/)[^/]+/specs/.+\.md"
 
 
 def strict_object(properties, required):
@@ -634,6 +635,10 @@ def resolved_clause(candidate, spec_path, text, reason_code, original_path=None)
   }
 
 
+def change_delta_spec_path(value):
+  return re.fullmatch(CHANGE_DELTA_SPEC_PATTERN, value) is not None
+
+
 def resolve_authority(root, candidate):
   if not isinstance(root, (str, Path)):
     return skipped("C4_AUTHORITY_INPUT_INVALID")
@@ -645,7 +650,8 @@ def resolve_authority(root, candidate):
   lexical_posix = lexical_path.as_posix()
   is_archive = lexical_posix.startswith("openspec/changes/archive/")
   is_live = lexical_posix.startswith("openspec/specs/")
-  if not relative_path_valid(lexical_posix) or not (is_archive or is_live):
+  is_change_delta = not is_archive and change_delta_spec_path(lexical_posix)
+  if not relative_path_valid(lexical_posix) or not (is_archive or is_live or is_change_delta):
     return skipped("C4_AUTHORITY_PATH_NOT_ALLOWED")
   try:
     root_path, source_path = safe_file(root, candidate["spec_path"])
@@ -655,6 +661,13 @@ def resolve_authority(root, candidate):
       live_root = (root_path / "openspec/specs").resolve()
       if not source_path.is_relative_to(live_root):
         return skipped("C4_SPEC_PATH_OUTSIDE_LIVE_ROOT")
+    elif is_change_delta:
+      changes_root = (root_path / "openspec/changes").resolve()
+      if not source_path.is_relative_to(changes_root):
+        return skipped("C4_SPEC_PATH_OUTSIDE_CHANGE_ROOT")
+      archive_dir = root_path / "openspec/changes/archive"
+      if archive_dir.is_dir() and source_path.is_relative_to(archive_dir.resolve()):
+        return skipped("C4_SPEC_PATH_OUTSIDE_CHANGE_ROOT")
     else:
       archive_root = (root_path / "openspec/changes/archive").resolve()
       if not source_path.is_relative_to(archive_root):
@@ -670,6 +683,13 @@ def resolve_authority(root, candidate):
   if location != (candidate["line_start"], candidate["line_end"]):
     return skipped("C4_SPEC_ANCHOR_MISMATCH")
   relative_source = source_path.relative_to(root_path).as_posix()
+  if is_change_delta:
+    return resolved_clause(
+      candidate,
+      relative_source,
+      text,
+      "C4_CHANGE_DELTA_AUTHORITY_RESOLVED",
+    )
   if not is_archive:
     return resolved_clause(
       candidate,
@@ -1070,9 +1090,10 @@ def packet_authority_valid(binding_context, packet):
   review_root = binding_context["review_root"]
   review_head = binding_context["review_head"]
   for clause in packet["clauses"]:
-    if not clause["spec_path"].startswith("openspec/specs/"):
+    spec_path = clause["spec_path"]
+    if not spec_path.startswith("openspec/specs/") and not change_delta_spec_path(spec_path):
       return False
-    entry = git_tree_entry(review_root, review_head, clause["spec_path"])
+    entry = git_tree_entry(review_root, review_head, spec_path)
     if entry is None:
       return False
     text = entry["text"]

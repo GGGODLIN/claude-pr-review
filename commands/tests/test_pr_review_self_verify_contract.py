@@ -59,16 +59,15 @@ class PrReviewSelfVerifyContractTest(unittest.TestCase):
       with self.subTest(marker=marker):
         self.assertIn(marker, self.command)
 
-  def test_agent_error_blocks_projection_but_preserves_cleanup(self):
-    self.assertIn("Self-Verify: BLOCKED (agent error)", self.command)
-    self.assertIn("不得執行投影 helper", self.command)
-    self.assertIn("跳至 Step 7 cleanup", self.command)
-    self.assertIn("不得消耗 draft", self.command)
-    blocked = self.command.index("Self-Verify: BLOCKED (agent error)")
-    helper = self.command.index("pr-review-report-projection.py", blocked)
-    cleanup = self.command.index("## Step 7:", helper)
-    self.assertLess(blocked, helper)
-    self.assertLess(helper, cleanup)
+  def test_agent_error_is_advisory_and_disclosed(self):
+    step_six = self.command.index("## Step 6: Output")
+    error_handling = self.command.index("## Error Handling", step_six)
+    output = self.command[step_six:error_handling]
+    self.assertIn("Self-Verify: SKIPPED (agent error)", output)
+    self.assertIn("照常執行投影 helper 發布", output)
+    self.assertIn("本報告未經獨立稽查", output)
+    self.assertNotIn("BLOCKED (agent error)", output)
+    self.assertNotIn("不得執行投影 helper", output)
 
   def test_failures_are_repaired_without_claiming_reverification(self):
     self.assertIn("有執行證據就補寫", self.command)
