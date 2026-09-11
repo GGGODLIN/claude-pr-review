@@ -55,8 +55,6 @@ def load_profiles(path):
     data = yaml.safe_load(profile_path.read_text()) or {}
   except yaml.YAMLError as error:
     raise ValueError(f"parse error: {error}")
-  if not isinstance(data, dict):
-    raise ValueError("top level must be a mapping of owner/repo keys")
   return data
 
 

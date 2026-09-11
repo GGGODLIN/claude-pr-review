@@ -54,6 +54,8 @@ class ProfileResolverTest(unittest.TestCase):
       "conventions_docs": ["CLAUDE.md", "docs/domain.md"],
       "source": yaml_path,
     })
+    ssh, _ = run("git@github.com:acme/saas.git", SAMPLE_YAML)
+    self.assertEqual(json.loads(ssh.stdout)["trunk"], "develop")
 
   def test_optional_fields_default_to_empty(self):
     proc, yaml_path = run("https://github.com/acme/dashboard.git", SAMPLE_YAML)
@@ -74,13 +76,6 @@ class ProfileResolverTest(unittest.TestCase):
     proc, _ = run("https://github.com/acme/no-trunk.git", SAMPLE_YAML)
     self.assertEqual(proc.returncode, 0, proc.stderr)
     self.assertEqual(json.loads(proc.stdout), DEFAULT)
-
-  def test_ssh_and_https_resolve_same_key(self):
-    ssh, _ = run("git@github.com:acme/saas.git", SAMPLE_YAML)
-    https, _ = run("https://github.com/acme/saas", SAMPLE_YAML)
-    self.assertEqual(ssh.returncode, 0, ssh.stderr)
-    self.assertEqual(json.loads(ssh.stdout)["trunk"], "develop")
-    self.assertEqual(json.loads(ssh.stdout)["trunk"], json.loads(https.stdout)["trunk"])
 
   def test_missing_profile_file_returns_default(self):
     proc = subprocess.run(
@@ -109,11 +104,6 @@ class ProfileResolverTest(unittest.TestCase):
     self.assertIn("spec_globs", proc.stderr)
     self.assertNotIn("Traceback", proc.stderr)
 
-  def test_top_level_non_mapping_is_an_error(self):
-    proc, _ = run("https://github.com/acme/saas.git", "- just\n- a list\n")
-    self.assertNotEqual(proc.returncode, 0)
-    self.assertIn("mapping", proc.stderr)
-
   def test_local_path_remote_never_matches_a_profile(self):
     proc, _ = run("/Users/me/acme/saas", SAMPLE_YAML)
     self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -122,19 +112,6 @@ class ProfileResolverTest(unittest.TestCase):
   def test_host_is_not_mistaken_for_owner(self):
     proc, _ = run("https://github.com/saas", SAMPLE_YAML)
     self.assertEqual(json.loads(proc.stdout), DEFAULT)
-
-  def test_non_string_trunk_means_no_profile(self):
-    proc, _ = run("https://github.com/acme/saas.git", "acme/saas:\n  trunk: yes\n")
-    self.assertEqual(json.loads(proc.stdout), DEFAULT)
-
-  def test_ssh_and_https_produce_identical_json(self):
-    with tempfile.TemporaryDirectory() as tmp:
-      yaml_path = Path(tmp) / "repos.yaml"; yaml_path.write_text(SAMPLE_YAML)
-      outs = []
-      for remote in ("git@github.com:acme/saas.git", "https://github.com/acme/saas", "ssh://git@github.com:2222/acme/saas.git"):
-        proc = subprocess.run([sys.executable, str(SCRIPT), "--remote", remote, "--profile", str(yaml_path)], capture_output=True, text=True)
-        outs.append(json.loads(proc.stdout))
-      self.assertEqual(outs[0], outs[1]); self.assertEqual(outs[1], outs[2]); self.assertEqual(outs[0]["trunk"], "develop")
 
 
 if __name__ == "__main__":

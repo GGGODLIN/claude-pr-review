@@ -100,7 +100,7 @@ Calibration entries record how this author historically responds to review findi
 - `PR_DESTINATION_SHA` = full destination commit SHA：`destination.commit.hash`（Bitbucket）／base commit OID（GitHub）
 - `SOURCE_REPO_UUID`／`DESTINATION_REPO_UUID` = Bitbucket source／destination repository UUID；GitHub 分別使用 `headRepository.id` 與 `gh repo view` 的 destination repository `id`
 - `BASE_BRANCH` = destination/base branch name
-- `REPO_PROFILE` = private repo profile, resolved once; later steps only read its output (no profile = every field falls back to the default, behaviour identical to before):
+- `REPO_PROFILE` = private repo profile, resolved once; later steps only read its output (no profile = zero configuration, every field falls back to its default; differences from older versions come from the engine fixes, not from the profile):
 
   ```bash
   REPO_PROFILE=$(python3 ~/.claude/scripts/pr-review-profile.py --remote "$(git -C "$(git rev-parse --show-toplevel)" remote get-url origin)")
@@ -707,7 +707,7 @@ echo "$ROLLOUTS"
 ~/.claude/scripts/poll-liveness.sh poll \
   --pgrep "codex review" --success '"type":"task_complete"' \
   --deadline 540 ${=ROLLOUTS}
-# ${=ROLLOUTS}：zsh 預設不對變數做 word split，裸 $ROLLOUTS 會把多行路徑當成一個參數、poll 找不到檔回假 STUCK_SUSPECT；${=VAR} 是 zsh 專用語法，bash／sh 下會 bad substitution 直接失敗——本流程的 Bash tool 是 zsh；要在 bash 跑改用 IFS=$'\n' 加裸 $VAR
+# ${=ROLLOUTS}：zsh 預設不對變數做 word split，裸 $ROLLOUTS 會把多行路徑當成一個參數、poll 找不到檔回假 STUCK_SUSPECT（${=VAR} 是 zsh 專用語法；本流程的 Bash tool 是 zsh）
 # exit 0 DONE → 接下方「Finish → 讀 token + verdict」
 # exit 1 STILL_RUNNING → 下輪 Bash tool call 重跑本段（上限估 3-4 輪、deep preset 5-6 輪）
 # exit 2 DEAD → codex 靜默死亡（token 已沉沒）：看 $LOG 尾判死因、retry 一次（config 層已剝 MCP 仍死 → 報告註明缺軸）

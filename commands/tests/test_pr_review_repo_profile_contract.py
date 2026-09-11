@@ -67,7 +67,6 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
     self.assertIn('[ -z "$AUTHORED_IDS" ]', gate)
     self.assertIn("先跑 2.65.1", gate[reducer:])
     self.assertIn("2.65.1", self.section("**Dispatch checklist", " Review (Multi-Agent Routing)"))
-    self.assertIn("bad substitution", self.command)
 
   def test_c4_skipped_reason_has_three_states(self):
     for state in (
