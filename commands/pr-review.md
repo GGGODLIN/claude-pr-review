@@ -5,11 +5,12 @@ argument-hint: "<PR-URL-or-number>"
 
 # PR Review
 
-> ⚠️ **本檔在契約測試底下**：`skills/bitbucket-pr-mutation/scripts/tests/test_no_raw_bitbucket_writes.py` 會讀 Step 8，斷言步驟 marker 的順序與 tier 保證句；`commands/tests/test_pr_review_report_projection_contract.py` 會讀 Step 5–6，斷言雙層報告投影接線；`commands/tests/test_pr_review_c4_dispatch_contract.py` 會讀 C4 派工段，斷言 prepared marker 接線與人工 prompt 退役；`commands/tests/test_pr_review_self_verify_contract.py` 會讀 Step 6，斷言 Self-Verify 接線與 advisory 行為。改動對應段落後四套都要跑。
+> ⚠️ **本檔在契約測試底下**：`skills/bitbucket-pr-mutation/scripts/tests/test_no_raw_bitbucket_writes.py` 會讀 Step 8，斷言步驟 marker 的順序與 tier 保證句；`commands/tests/test_pr_review_report_projection_contract.py` 會讀 Step 5–6，斷言雙層報告投影接線；`commands/tests/test_pr_review_c4_dispatch_contract.py` 會讀 C4 派工段，斷言 prepared marker 接線與人工 prompt 退役；`commands/tests/test_pr_review_self_verify_contract.py` 會讀 Step 6，斷言 Self-Verify 接線與 advisory 行為；`commands/tests/test_pr_review_repo_profile_contract.py` 會讀 Step 2／2.5／2.55／2.6／2.65／3 與 codex 起手段，斷言 repo profile 接線、zsh 相容寫法、`--paginate` 與 C4 三態。改動對應段落後四套都要跑。
 > `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q`
 > `python3 commands/tests/test_pr_review_report_projection_contract.py`
 > `python3 commands/tests/test_pr_review_c4_dispatch_contract.py`
 > `python3 commands/tests/test_pr_review_self_verify_contract.py`
+> `python3 commands/tests/test_pr_review_repo_profile_contract.py`
 
 Orchestrate a multi-axis code review (CC context-aware + Codex neutral & adversarial + Gemini Flash permanent axis; Gemini Pro opt-in) for a pull request and produce a Traditional Chinese comparison report.
 
@@ -41,7 +42,8 @@ Orchestrate a multi-axis code review (CC context-aware + Codex neutral & adversa
 gh pr view <number> --json title,body,state,baseRefName,headRefName,headRefOid,baseRefOid,headRepository,author,additions,deletions,changedFiles,commits
 gh repo view --json id,nameWithOwner
 gh pr diff <number>
-gh pr view <number> --json files --jq '.files[].path'
+# 完整檔案清單（F 的來源）：走 REST 分頁。`gh pr view --json files` 的 GraphQL 路徑上限 100 檔、超過就靜默截斷，只當快速預覽用
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/files?per_page=100" --jq '.[].filename'
 ```
 
 ### Bitbucket
@@ -76,10 +78,10 @@ Set `input_binding: verified` only after Step 2.5 proves the review worktree HEA
 
 ## Step 2.2: Load Author Calibration (if present)
 
-Slugify the PR author's display name fetched in Step 2 (lowercase, spaces → hyphens, e.g. `Jane Doe` → `jane-doe`), then try to read:
+Slugify the PR author's display name fetched in Step 2 (lowercase, spaces → hyphens, e.g. `Jane Doe` → `jane-doe`), then try to read the private calibration file (kept outside every repo so nothing reviewer-specific lands in team version control):
 
 ```
-<repo-root>/docs/pr-review-calibration/<author-slug>.md
+~/.claude/pr-review/calibration/<author-slug>.md
 ```
 
 - File exists → load the author's entries; they apply in Step 5 when assigning 最終建議 (Must / Should / Nice / 參考用) and when phrasing inline comments.
@@ -89,7 +91,7 @@ Calibration entries record how this author historically responds to review findi
 
 ## Step 2.5: Sync review env to PR branch via worktree (MANDATORY before Step 3)
 
-**為什麼這條必須**：codex review 跟 Opus 都會 `git show` / grep / Read 本地檔案。本地 branch 若 stale（user 沒 `git fetch`、或 PR 作者 force-push 後）→ codex 看的是舊版、Comment Resolution verdict 全錯。直接 `git checkout` 主 repo 又會撞 user dirty working tree / worktree 衝突。**用 worktree 隔離環境是 textbook 用例**。
+**為什麼這條必須**：codex review 跟 Opus 都會 `git show` / grep / Read 本地檔案。本地 branch 若 stale（user 沒 `git fetch`、或 PR 作者 force-push 後）→ codex 看的是舊版、Comment Resolution verdict 全錯（這類摩擦集中記在 `~/.claude/pr-review/friction.md`，下次改流程時一次處理）。直接 `git checkout` 主 repo 又會撞 user dirty working tree / worktree 衝突。**用 worktree 隔離環境是 textbook 用例**。
 
 從 Step 2 拿到的 PR data 取：
 
@@ -98,7 +100,15 @@ Calibration entries record how this author historically responds to review findi
 - `PR_DESTINATION_SHA` = full destination commit SHA：`destination.commit.hash`（Bitbucket）／base commit OID（GitHub）
 - `SOURCE_REPO_UUID`／`DESTINATION_REPO_UUID` = Bitbucket source／destination repository UUID；GitHub 分別使用 `headRepository.id` 與 `gh repo view` 的 destination repository `id`
 - `BASE_BRANCH` = destination/base branch name
-- `TRUNK_BRANCH` = repo 主幹名：`git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||'`，解析不到就用 `master`——2.55 provenance 與 C4 authored-hunk 推導一律引用它、不硬編 master
+- `REPO_PROFILE` = private repo profile, resolved once; later steps only read its output (no profile = every field falls back to the default, behaviour identical to before):
+
+  ```bash
+  REPO_PROFILE=$(python3 ~/.claude/scripts/pr-review-profile.py --remote "$(git remote get-url origin)")
+  # JSON: trunk (null = no profile), spec_globs[], conventions_docs[], source (repos.yaml path or "default")
+  ```
+
+  The profile file is `~/.claude/pr-review/repos.yaml`, top-level key `owner/repo`, fields only `trunk`, `spec_globs`, `conventions_docs`; a missing `trunk` means no profile. `spec_globs` feeds 2.6, `conventions_docs` feeds the Step 3 CC shared prompt, nothing else reads them.
+- `TRUNK_BRANCH` = repo 主幹名，決定順序固定三層：(1) `REPO_PROFILE.trunk` 有值就用它；(2) 否則 `git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||'`；(3) 解析不到用 `master`。同時記 `TRUNK_SOURCE` 為 `profile <source 路徑>`／`origin/HEAD`／`default master`，報告 header 印一行 `TRUNK=<x> (source: profile <path> | origin/HEAD | default master)`。2.55 provenance 與 C4 authored-hunk 推導一律引用 `TRUNK_BRANCH`、不硬編 master；開發主幹不是 GitHub default branch 的 repo（trunk 是 develop／stage 之類）只靠 (2) 會推錯，這正是 profile 存在的理由
 - `PR_ID` = PR number / id
 
 ### 2.5.1 Fetch + sanity check
@@ -127,7 +137,7 @@ ln -s "$REPO_ROOT/node_modules" "$REVIEW_ROOT/node_modules" 2>/dev/null || true
 
 ### 2.5.3 Lock all subsequent file ops to $REVIEW_ROOT
 
-**Critical**：CC 後續所有 Bash / Read / Edit / Grep / semble 都用 `$REVIEW_ROOT` 為 root 的**絕對路徑**。`cd` 在 Bash tool 跨 call 不會持久（每次 Bash 是新 shell），**不能只靠 `cd`**——必須路徑前綴明確用 `$REVIEW_ROOT`：
+**Critical**：CC 後續所有 Bash / Read / Edit / Grep / semble 都用 `$REVIEW_ROOT` 為 root 的**絕對路徑**。Bash tool 的 cwd 可能跨 call 殘留（某些 harness 版本每次 Bash 是新 shell、某些會把上一 call 的 `cd` 帶到下一 call），兩種行為都不能依賴——**不能只靠 `cd`**，必須路徑前綴明確用 `$REVIEW_ROOT`：
 
 ```bash
 # ❌ Wrong — 看到主 repo 的 stale 內容
@@ -139,7 +149,7 @@ grep -n "foo" "$REVIEW_ROOT/src/server/handlers.ts"
 
 `semble search` 的 `repo` 參數也改成 `$REVIEW_ROOT`，否則它去主 repo index、看的還是主 repo 的 branch HEAD。
 
-**Codex 透過 `codex-companion.mjs` 起 task 時繼承 main session launching Bash 的 cwd** ——所以起 codex 的那個 Bash call 必須 `cd "$REVIEW_ROOT" &&` prefix（Step 3 已寫死）。Codex 在 worktree cwd 跑 → 它 `git show <file>` / `git log` / grep / find 看的全是 PR branch HEAD。**Codex 可以自由探索、不用禁它讀 git**——這是 worktree 帶來的關鍵紅利。
+**Codex 透過 `codex-companion.mjs` 起 task 時繼承 main session launching Bash 的 cwd** ——所以起 codex 的那段一律寫成子 shell `(cd "$REVIEW_ROOT" && nohup … &)`，`cd` 只在子 shell 內生效、不外漏到後續 call（Step 3 已寫死）；其餘 git 操作用 `git -C "$REVIEW_ROOT"`。Codex 在 worktree cwd 跑 → 它 `git show <file>` / `git log` / grep / find 看的全是 PR branch HEAD。**Codex 可以自由探索、不用禁它讀 git**——這是 worktree 帶來的關鍵紅利。
 
 ### 2.5.4 Caveats
 
@@ -152,18 +162,18 @@ grep -n "foo" "$REVIEW_ROOT/src/server/handlers.ts"
 
 ---
 
-## Step 2.55: Authored vs Inherited Provenance（base ≠ master 時必跑）
+## Step 2.55: Authored vs Inherited Provenance（base ≠ trunk 時必跑）
 
-**為什麼**：hotfix branch 從 default branch 切、PR 打 staging / pre-production base 時，diff 會夾帶「default branch 有、base 還沒有」的內容——這些檔不是 PR 作者寫的、已在各自原 PR 審過。不判 provenance 的後果：cross-axis CONFIRMED 的 inherited 缺陷會被誤標 Must Fix、貼到無辜作者頭上。
+**為什麼**：hotfix branch 從 trunk 切、PR 打 staging / pre-production base 時，diff 會夾帶「trunk 有、base 還沒有」的內容——這些檔不是 PR 作者寫的、已在各自原 PR 審過。不判 provenance 的後果：cross-axis CONFIRMED 的 inherited 缺陷會被誤標 Must Fix、貼到無辜作者頭上。
 
-**Trigger**：`BASE_BRANCH` 不是 master / main（典型情境 = hotfix branch 從 default branch 切、PR 打 staging / pre-production base）。base 是 master 的一般 PR → 跳過本步、報告 header 標「provenance: N-A（base = master）」。
+**Trigger**：`BASE_BRANCH` ≠ `TRUNK_BRANCH`（Step 2.5 解析出的主幹；hotfix→staging / pre-production 這類 PR 就是這型）。base = trunk 的一般 PR → 本步照跑、結果自然全 authored，報告 header 標「provenance: N authored / 0 inherited（base = trunk）」，不要寫 N-A——N-A 會讓讀者分不出「沒跑」與「跑了沒 inherited」。
 
 ```bash
 git fetch origin "$TRUNK_BRANCH" --quiet
 # 逐檔判定：與 origin/$TRUNK_BRANCH 上該檔的 PR-branch 差異為空 = inherited
 for f in <Step 2 diffstat 的每個變更檔（與 2.95 的 F 同源；此時 F 尚未正式建立）>; do
   if git diff --quiet "origin/$TRUNK_BRANCH" "origin/$PR_BRANCH" -- "$f"; then
-    echo "inherited: $f"    # master 內容流向 base、已在原 PR 審過
+    echo "inherited: $f"    # trunk 內容流向 base、已在原 PR 審過
   else
     echo "authored: $f"     # 本 PR 真正的變更
   fi
@@ -189,6 +199,7 @@ From the PR's changed-file list, flag a `.md` file as a spec if ANY of:
 - Filename matches `*-spec.md`, `*-plan.md`, `*-design.md`, `*-brainstorm.md`, `*-requirements.md`, `*-proposal.md`
 - Filename looks like `YYYY-MM-DD-*.md` (common date-prefixed plan naming)
 - File starts with frontmatter containing `type: plan` / `type: spec` / `type: design` / `phase:` / `goals:` / `non_goals:`
+- Path matches any `REPO_PROFILE.spec_globs` entry（Step 2.5；疊加在上面四條之上、不取代它們）。命中的檔一樣走下方非正式注入（內嵌 spec content 給 reviewer），不是 C4 權威來源——團隊把規格放在自己慣用的位置時，這條讓它們被當成 spec 讀，而不必改流程檔
 
 Explicitly NOT specs: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`.
 
@@ -214,6 +225,48 @@ Set `SPEC_COMPLIANCE.gate=ELIGIBLE` only when at least one clause has all four:
 4. A plausible intersection with an authored changed implementation flow in F, including a required behavior that may be missing from code.
 
 Quotes, examples, recommendations, rationale, goals/non-goals, historical text, deprecated clauses, informal plan/design prose, and a bare uppercase keyword do not qualify. When the flow mapping is uncertain, skip C4 rather than treating authority-sounding text as a contract.
+
+### 2.65.1 Scan live normative sources before finalizing SKIPPED
+
+Candidates do not only come from documents the PR itself touched. A repo can hold formal specs that govern the changed flow without the PR editing them; skipping C4 without looking at those makes `SKIPPED` mean either "checked, nothing applies" or "never checked", and the report cannot tell the two apart. Run this scan once before any `SKIPPED` decision. It only proposes candidates; every candidate still has to pass the four conditions above and the reducer below, and the authority sources it reads are exactly the ones the reducer already accepts (current specs and unpromoted change deltas; archive stays an alias and is never scanned as a source).
+
+```bash
+# Normative sources = the openspec paths the reducer already recognises (archive excluded)
+NORMATIVE_FILES=$(git -C "$REVIEW_ROOT" ls-files 'openspec/specs/**/spec.md' 'openspec/changes/*/specs/**/spec.md' 2>/dev/null | grep -v '^openspec/changes/archive/')
+NORMATIVE_COUNT=$(printf '%s\n' "$NORMATIVE_FILES" | grep -c . || true)
+if [ -z "$REVIEW_ROOT" ] || [ ! -d "$REVIEW_ROOT" ]; then
+  NORMATIVE_SCAN="scan not run: REVIEW_ROOT unavailable"
+elif [ "$NORMATIVE_COUNT" -eq 0 ]; then
+  NORMATIVE_SCAN="no normative source"
+else
+  # Identifiers of authored files (Step 2.55 provenance): basenames, exported symbols, route/path literals
+  AUTHORED_IDS=$(for f in ${=AUTHORED_FILES}; do
+    basename "$f" | sed -E 's/\.[^.]+$//'
+    command grep -hoE 'export (default )?(async )?(const|function|class|interface|type|enum) +[A-Za-z_][A-Za-z0-9_]*' "$REVIEW_ROOT/$f" 2>/dev/null | awk '{print $NF}'
+    command grep -hoE "@(Get|Post|Put|Patch|Delete|Controller)\(['\"][^'\"]+['\"]\)" "$REVIEW_ROOT/$f" 2>/dev/null | sed -E "s/.*\(['\"]([^'\"]+)['\"]\)/\1/"
+  done | sort -u | grep -E '.{6,}' | grep -vxE 'index|types|utils|constants|module|service|controller|schema|README|spec|test')   # 泛用字會撞條款裡的一般用語（實測 index.ts 撞到「TTL index」），整字比對加停用清單
+  INTERSECT=$(for spec in ${=NORMATIVE_FILES}; do
+    command grep -nE 'MUST|SHALL|NEVER' "$REVIEW_ROOT/$spec" 2>/dev/null | command grep -F -w -f <(printf '%s\n' "$AUTHORED_IDS") | sed "s|^|$spec:|"
+  done)
+  if [ -z "$INTERSECT" ]; then
+    NORMATIVE_SCAN="normative sources scanned, none intersect (scanned $NORMATIVE_COUNT)"
+  else
+    NORMATIVE_SCAN="normative sources scanned, $(printf '%s\n' "$INTERSECT" | wc -l | tr -d ' ') clause lines intersect (scanned $NORMATIVE_COUNT)"
+    printf '%s\n' "$INTERSECT"   # each line is a candidate: path:line:clause → feed the four conditions + reducer
+  fi
+fi
+echo "NORMATIVE_SCAN=$NORMATIVE_SCAN"
+```
+
+`AUTHORED_FILES` is the authored subset from Step 2.55; when 2.55 has not run yet (base = trunk), use the full Step 2 file list. If F is empty or the scan command itself fails, set `NORMATIVE_SCAN="scan not run: <原因>"` and keep going — the scan never blocks the review. Any intersect line is a candidate for the four conditions and the reducer; the scan itself never sets `ELIGIBLE`.
+
+When no candidate survives, the finalized `SKIPPED` carries the scan state as its reason text, one of exactly three:
+
+- `SKIPPED (no normative source)` — the repo has no recognised normative files
+- `SKIPPED (normative sources scanned, none intersect)` — N sources read, no clause mentions any authored identifier
+- `SKIPPED (scan not run: <原因>)` — the scan could not execute; say why
+
+`reason_code` stays a stable machine code; the three-state text goes in the header line and 「Spec 依據」 so a reader can tell "checked and nothing applies" from "never checked". 完成後接下方 reducer 段。
 
 Before a candidate can enter the clause inventory, pass it through the deterministic authority reducer:
 
@@ -341,8 +394,9 @@ Deterministic dependency-graph facts for the PR's modified entities — NOT LLM 
 Before dispatching any reviewer, build the **authoritative changed-file set F by program, not by LLM judgement**. This is the anchor that makes coverage verifiable later (Step 4.5).
 
 ```bash
-# GitHub (already fetched in Step 2):
-gh pr view <number> --json files --jq '.files[].path'
+# GitHub (already fetched in Step 2；同一條分頁指令，不用 --json files 的 100 檔上限路徑):
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/files?per_page=100" --jq '.[].filename'
+# 對照 changedFiles 數：wc -l 應等於 Step 2 的 changedFiles，不等就停、不要拿截斷的 F 往下跑
 # Bitbucket: use the diffstat already fetched per bitbucket-pr-review skill — list every changed file path.
 ```
 
@@ -390,7 +444,7 @@ Run **once** in the Step 2.5 worktree — it is already at PR HEAD with base fet
 
 ```bash
 # base 用 merge-base 定錨（branch ref 會把 master 反向 commit 算進 changed scope、changed 檔數暴增）
-cd "$REVIEW_ROOT" && PR_BASE=$(git merge-base "origin/$BASE_BRANCH" HEAD) && npx -y react-doctor@latest . --offline --no-score --scope changed --base "$PR_BASE" --json > /tmp/rd-axis.json
+PR_BASE=$(git -C "$REVIEW_ROOT" merge-base "origin/$BASE_BRANCH" HEAD) && (cd "$REVIEW_ROOT" && npx -y react-doctor@latest . --offline --no-score --scope changed --base "$PR_BASE" --json > /tmp/rd-axis.json)
 ```
 
 Deterministic CLI = same output every run → do **NOT** inject results into any model axis prompt (Opus / Codex / Gemini stay blind; per-model reruns are zero-value duplication, and injection would contaminate axis independence). CC (main) alone consumes it at synthesis:
@@ -534,7 +588,8 @@ Each primary reviewer and general domain reviewer such as `security-reviewer` re
 - Changed files with their purpose (highlight which files triggered this reviewer's specialty)
 - Full diff
 - **Spec / plan content from Step 2.6** (verbatim if ≤ 8k tokens, summarised otherwise); if absent, state "no spec attached"
-- **Provenance 清單（Step 2.55、base ≠ master 時）** — authored / inherited 檔分列，指示 authored 深審、inherited 輕掃（仍要 per-file accounting、真缺陷照報並標 inherited）
+- **Provenance 清單（Step 2.55）** — authored / inherited 檔分列，指示 authored 深審、inherited 輕掃（仍要 per-file accounting、真缺陷照報並標 inherited）
+- **Conventions docs（`REPO_PROFILE.conventions_docs`、有才加）** — 一行路徑清單，形式「開審前先讀完這些檔：`$REVIEW_ROOT/<path>` …」，讓 reviewer 用團隊自己寫的慣例判「該不該這樣寫」，而不是用通用直覺。路徑在 `$REVIEW_ROOT` 不存在就從清單拿掉，並在報告「沒做的部分」印一行 `conventions_docs 缺檔：<path>`；清單空就不加這條。只進這份 CC shared prompt——Codex、Gemini、C4 packet 一律不注入
 - Available search tool per Step 2.7 (Grep by default; semantic-search MCP if Step 2.7 detected one)
 - Request severity ratings: CRITICAL, HIGH, MEDIUM, LOW — 安全類 finding 的級別必須照 `~/.claude/references/severity-calibration.md` 算（讀該檔：先填四格事實，再套 impact × likelihood 矩陣，HIGH / CRITICAL 另需過六項驗收），並在該 finding 附上四格事實。非安全類（品質 / 效能 / 設計）沿用各 reviewer 自己的分類判準。
 - **Cross-cutting baseline (Step 2.8)** — full Step 2.8 checklist verbatim, all five sections (Reuse / Quality / Efficiency / Design Decay / Dependency Bumps — the last only fires when the diff touches dependency files), with reminder: "Apply these patterns in addition to your language/domain checks. Search-before-flag discipline (Step 2.7) still applies — attach search-proof when flagging a Reuse 1 / Quality 5 type gap."
@@ -575,7 +630,7 @@ git -C "$REVIEW_ROOT" rev-parse HEAD
 
 #### Run（background + rollout jsonl poll、繞開 CC Bash tool 10 min 上限）
 
-⚠️ **必須 `cd "$REVIEW_ROOT" &&` prefix**——`codex review` 看 HEAD 的 cwd。在主 repo cwd 跑就走主 repo HEAD（user 當前 branch、跟 PR 無關）。
+⚠️ **必須在子 shell 內 `(cd "$REVIEW_ROOT" && …)` 起跑**——`codex review` 看 HEAD 的 cwd。在主 repo cwd 跑就走主 repo HEAD（user 當前 branch、跟 PR 無關）；子 shell 讓 `cd` 不外漏到後續 Bash call（見 2.5.3 的 cwd 殘留說明）。
 
 ⚠️ **不要用前景 `--wait`**——CC Bash tool 上限 10 min 硬 clamp、Sol xhigh 中大型 PR 就撞（前景第 10 分鐘被 SIGTERM kill、rollout 半途中斷）。改用 subshell + nohup detach + rollout jsonl `task_complete` event poll 判 finish。
 
@@ -622,7 +677,7 @@ LOG=/tmp/pr-review-codex-neutral-${PR_ID}.log
 : > "$LOG"
 LAUNCH_EPOCH=$(date +%s)
 
-cd "$REVIEW_ROOT" && (nohup codex review \
+(cd "$REVIEW_ROOT" && nohup codex review \
   --base "origin/$BASE_BRANCH" \
   -c "model=\"$CODEX_MODEL\"" \
   -c 'mcp_servers={}' \
@@ -643,7 +698,8 @@ echo "$ROLLOUTS"
 ```bash
 ~/.claude/scripts/poll-liveness.sh poll \
   --pgrep "codex review" --success '"type":"task_complete"' \
-  --deadline 540 $ROLLOUTS
+  --deadline 540 ${=ROLLOUTS}
+# ${=ROLLOUTS}：zsh 預設不對變數做 word split，裸 $ROLLOUTS 會把多行路徑當成一個參數、poll 找不到檔回假 STUCK_SUSPECT；${=VAR} 在 zsh 強制切詞、bash 下等同 $VAR
 # exit 0 DONE → 接下方「Finish → 讀 token + verdict」
 # exit 1 STILL_RUNNING → 下輪 Bash tool call 重跑本段（上限估 3-4 輪、deep preset 5-6 輪）
 # exit 2 DEAD → codex 靜默死亡（token 已沉沒）：看 $LOG 尾判死因、retry 一次（config 層已剝 MCP 仍死 → 報告註明缺軸）
@@ -653,7 +709,7 @@ echo "$ROLLOUTS"
 
 ⚠️ **外層 Bash tool timeout 必須 ≥ `--deadline` + 60s**（如 deadline 480 → timeout 540000ms）——`poll-liveness.sh` 會在內部 block 到 deadline，外層 timeout 先到會把 poll SIGTERM 砍掉（exit 143 假死、codex 本體不受影響但浪費一輪）；也不要在 poll 前面同 call 串長 `sleep` 佔掉 timeout（`sleep 120` + poll 塞同 call、外層 timeout 會先到）。**對抗軸與 Step 4.2 的 poll 同規則**。
 
-DONE 後把 `$ROLLOUTS` 中 size 最大的一個設為 `ROLLOUT_MAIN`（token 統計用）：`ROLLOUT_MAIN=$(ls -S $ROLLOUTS | head -1)`
+DONE 後把 `$ROLLOUTS` 中 size 最大的一個設為 `ROLLOUT_MAIN`（token 統計用）：`ROLLOUT_MAIN=$(ls -S ${=ROLLOUTS} | head -1)`
 
 **Finish → 讀 token + verdict**：
 
@@ -680,7 +736,7 @@ tail -80 "$LOG"
 
 **原則**（不變）：
 
-- `codex review` already carries its own review prompt contract and output schema (`${CODEX_PLUGIN_DIR}schemas/review-output.schema.json` — `verdict`, `findings[]`, `next_steps`). **Do NOT author a custom prompt, and do NOT append focus text** — codex plugin ≥ 1.0.2 hard-errors on trailing prompt text. Run it bare. Spec/scope context reaches Codex only through files in the checkout — it does read repo files.
+- `codex review` already carries its own review prompt contract and output schema (`${CODEX_PLUGIN_DIR%/}/schemas/review-output.schema.json` — `verdict`, `findings[]`, `next_steps`). **Do NOT author a custom prompt, and do NOT append focus text** — codex plugin ≥ 1.0.2 hard-errors on trailing prompt text. Run it bare. Spec/scope context reaches Codex only through files in the checkout — it does read repo files.
 - **When checkout is possible, do NOT route Codex review through `codex:codex-rescue` or `codex task`.** Those modes wrap Codex in a generic task/rescue prompt and lose the built-in review contract, forcing you to re-author the contract yourself in XML tags — 品質 不會 更好. (Exception: see Fallback below.)
 
 #### Restore
@@ -689,7 +745,7 @@ Config.toml 的 `.pr-review-bak` pristine 檔（前置 mutation (0) 產生）留
 
 **Fallback** — only when worktree setup or codex built-in review genuinely failed:
 
-- 透過 `cd "$REVIEW_ROOT" &&` prefix 跑 `codex:codex-rescue` subagent，**用 diff 文字 + `$REVIEW_ROOT` 路徑** 為 prompt（rescue mode 不像 `codex review` 自動定位 PR head、要在 prompt 內明確告知 cwd = PR branch）
+- 在子 shell `(cd "$REVIEW_ROOT" && …)` 內跑 `codex:codex-rescue` subagent，**用 diff 文字 + `$REVIEW_ROOT` 路徑** 為 prompt（rescue mode 不像 `codex review` 自動定位 PR head、要在 prompt 內明確告知 cwd = PR branch）
 - prompt 內可允許（鼓勵）codex 自由 `git show` / `grep` / `read file` 探索——worktree 隔離已保證它看的是 PR branch HEAD
 - 同樣 severity scale 跟 Opus 對齊
 - Expect lower signal quality than the built-in review path
@@ -750,11 +806,12 @@ fi
 
 ```bash
 CODEX_PLUGIN_DIR=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ 2>/dev/null | sort -V | tail -1)
+# 拼路徑一律 ${CODEX_PLUGIN_DIR%/}/scripts/…：zsh 下 `ls -d */` 有時不保留結尾斜線（bash 保留；zsh 實測兩種結果都出現過），直接 ${CODEX_PLUGIN_DIR}scripts 會拼成 …/1.0.2scripts → MODULE_NOT_FOUND；%/} 對有無斜線都正確
 LOG=/tmp/pr-review-codex-adversarial-${PR_ID}.log
 : > "$LOG"
 
-cd "$REVIEW_ROOT" && (env -u CODEX_COMPANION_SESSION_ID -u CLAUDE_PLUGIN_DATA \
-  nohup node "${CODEX_PLUGIN_DIR}scripts/codex-companion.mjs" \
+(cd "$REVIEW_ROOT" && env -u CODEX_COMPANION_SESSION_ID -u CLAUDE_PLUGIN_DATA \
+  nohup node "${CODEX_PLUGIN_DIR%/}/scripts/codex-companion.mjs" \
   adversarial-review --wait --base "origin/$BASE_BRANCH" --scope branch \
   -m "$CODEX_MODEL" \
   > "$LOG" 2>&1 < /dev/null &)
@@ -986,8 +1043,8 @@ Do NOT delete the finding — the final report will show your verdict alongside 
 CODEX_PLUGIN_DIR=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ 2>/dev/null | sort -V | tail -1)
 VLOG=/tmp/pr-review-codex-verify-${PR_ID}.log
 : > "$VLOG"
-cd "$REVIEW_ROOT" && (env -u CODEX_COMPANION_SESSION_ID -u CLAUDE_PLUGIN_DATA \
-  nohup node "${CODEX_PLUGIN_DIR}scripts/codex-companion.mjs" \
+(cd "$REVIEW_ROOT" && env -u CODEX_COMPANION_SESSION_ID -u CLAUDE_PLUGIN_DATA \
+  nohup node "${CODEX_PLUGIN_DIR%/}/scripts/codex-companion.mjs" \
   task --fresh "$(cat /tmp/codex-verify-opus-prompt.txt)" \
   > "$VLOG" 2>&1 < /dev/null &)
 sleep 10
@@ -1192,6 +1249,7 @@ This is the deterministic positioning borrowed from open-code-review's tracking 
 **變更**: N 檔案, +A / -D
 **審查日期**: YYYY-MM-DD
 **Review input basis**: source repo UUID + full source SHA；destination repo UUID + full destination SHA；`input_binding: verified | unverified`
+**Trunk**: `TRUNK=<x> (source: profile <path> | origin/HEAD | default master)`（Step 2.5；provenance 與 C4 authored-hunk 以它為基準）
 **Review continuity**: `source_continuity=CURRENT|NEW_COMMITS|HISTORY_REWRITE|UNKNOWN`；`base_changed=true|false|unknown`；`review_context_changed=true|false`
 **審查工具**: CC (<main session 實際模型名>)（context-aware reviewer agents；實際 reviewer 模型以下一行與 dispatch receipt 為準）+ Codex 中性 (diff-only, fresh eyes) + **Codex 對抗式 (紅隊)** + Cross-axis verification (4.1 CC 驗非 CC 軸 + **4.2 Codex 驗 CC first-pass、對稱化**) + **Gemini 軸**（Flash 3.6 永久軸 + Pro 3.1 opt-in、依 `$EXTRA_AXES`）：軸 4 Gemini 3.1 Pro (High) / 軸 5 Gemini 3.6 Flash (High)
 **Reviewer model 記錄規則**: 上一行只描述工具組合；固定模型 reviewer 不套用「繼承 main session 模型」，實際身分以下一行與 dispatch receipt 為準。
@@ -1199,7 +1257,7 @@ This is the deterministic positioning borrowed from open-code-review's tracking 
 **覆蓋 (ENH-A)**: |F|=N → covered C / no-issues R / skipped S / **missed M**（chunked: 是/否，門檻 15 檔 or 800 行）
 **定位 (ENH-B)**: anchored exact X / ambiguous Y / **FAILED Z**
 **React-doctor (2.97)**: 新引入 N 條 / 未引入新問題（既有 M 條不計）/ SKIPPED (<reason>) / N-A（非 React PR）— 四者擇一
-**Formal spec traceability (2.65)**: SKIPPED (<reason_code>) / DISPATCHED（clauses C / findings F / observations O / invalidated I）/ FAILED (<reason_code>)
+**Formal spec traceability (2.65)**: `SKIPPED (<reason_code>)` 加三態掃描文字之一——`SKIPPED (no normative source)` / `SKIPPED (normative sources scanned, none intersect)` / `SKIPPED (scan not run: <原因>)`——/ `DISPATCHED（clauses C / findings F / observations O / invalidated I）` / `FAILED (<reason_code>)`
 **Quota (Gemini 軸 only、選填)**: weekly before X% / after Y% / Δ = Z%；5h before A% / after B% / Δ = C%（dashboard snapshot 對照、source https://antigravity.google.com）——需開瀏覽器、流程不強制；未取時寫「未取 dashboard snapshot」即可
 **審查軸狀態**: primary/domain／Codex 中性／Codex 對抗／Gemini Flash／Gemini Pro（未啟用寫 N-A）／cross-axis verification，各軸寫 PASS／FAIL／N-A + 證據或原因；不得殘留 PENDING
 
@@ -1210,7 +1268,7 @@ This is the deterministic positioning borrowed from open-code-review's tracking 
 - 若偵測到 spec / plan 檔：列出檔名 + 關鍵 goals / non-goals / decisions 摘要
 - 標注 spec 作者：同人 → 「⚠️ spec 作者 = PR 作者（out-of-scope 判定以此 spec 為據時，注意作者自寫 spec 的利益重疊）」；不同人 → 「spec 作者：<name>（≠ PR 作者）」（Step 2.6 item 5）
 - 若未偵測到：註明「此 PR 未附 spec／plan 文件，按一般 PR 流程 review」
-- 列出 `SPEC_COMPLIANCE` receipt：`gate`、`dispatch`、`dispatch_count`、`reason_code`、`requested_model`、`observed_model`、`effort`、runtime tool call count/names。`SKIPPED` 時明列 0 clauses／0 findings；`FAILED` 時保留穩定錯誤碼但不補派 reviewer；runtime model 不可得或 transcript 未綁 dispatch 時寫 `observed_model=UNAVAILABLE` 並維持 FAILED，不得靠 frontmatter 補成成功。
+- 列出 `SPEC_COMPLIANCE` receipt：`gate`、`dispatch`、`dispatch_count`、`reason_code`、`requested_model`、`observed_model`、`effort`、runtime tool call count/names。`SKIPPED` 時明列 0 clauses／0 findings，並寫出 2.65.1 的掃描三態之一：`SKIPPED (no normative source)`、`SKIPPED (normative sources scanned, none intersect)`（附掃到的來源數 N）或 `SKIPPED (scan not run: <原因>)`；`FAILED` 時保留穩定錯誤碼但不補派 reviewer；runtime model 不可得或 transcript 未綁 dispatch 時寫 `observed_model=UNAVAILABLE` 並維持 FAILED，不得靠 frontmatter 補成成功。
 - `DISPATCHED` 時只從最後一次 reducer `human_projection` 列 clause classification counts、admitted finding count、observation count、invalidated count 與 stable reason codes。可逐條列 admitted clause ID、classification 與 spec anchor；不得逐條列 invalidated ID 或任何 invalidated 語意內容。C4 admitted finding 仍併入既有模型欄與複查欄，不新增獨立 review axis 欄。
 
 ## 變更概要
@@ -1393,7 +1451,7 @@ Weighted by verification verdict, but **all Codex findings are still shown below
 
 1. **6c Refactor Intent Gate** — 對「PR 移除/削弱既有防護、檢查、guard」類 finding，定 severity 前先過 6c：spec / PR description / commit message 三層設計意圖查證 → 判斷是邏輯耦合殘留還是真正防護削弱 → 追蹤新 contract 下該 invariant 由誰接手。查證結論寫進該條備註。
 2. **6d rules** — 6d-1 hedge cap / 6d-3 repro path + release-blocking（Must Fix 雙半條件：具體重現路徑 + 不修就壞「會出貨的東西」）；6d-2 lone-finding 已由本 command Step 4.3b 的判斷式複查取代——用 4.3b 的結論、不要再機械降級.
-3. **Provenance cap（Step 2.55）** — inherited 檔上的 finding 視同範圍外：即使 cross-axis CONFIRMED 也 cap 參考用 + 建議另開 ticket、comment 開頭標明「master 帶進的內容、不是本 PR 寫的」；只有 authored 檔的 finding 走正常分級。降級理由寫進「校準套用」／備註（never-drop 不變）。
+3. **Provenance cap（Step 2.55）** — inherited 檔上的 finding 視同範圍外：即使 cross-axis CONFIRMED 也 cap 參考用 + 建議另開 ticket、comment 開頭標明「trunk 帶進的內容、不是本 PR 寫的」；只有 authored 檔的 finding 走正常分級。降級理由寫進「校準套用」／備註（never-drop 不變）。
 
 **Author calibration (Step 2.2)**: if a calibration file was loaded for this PR's author, apply its entries HERE when assigning each finding's 最終建議 — downgrade or reword only, per Step 2.2 constraints. List every applied adjustment in a「校準套用」line under this section (finding # + calibration entry cited); if the file was loaded but nothing matched, write「校準檔已載入、本輪無套用」; if no calibration file exists for this author, write「無作者校準檔（<author-slug>.md 不存在）、本輪無套用」. The line is mandatory in all three states — it lets a report audit tell "ran, no file" from "step skipped".
 
@@ -1444,6 +1502,7 @@ Weighted by verification verdict, but **all Codex findings are still shown below
 ## 沒做的部分（結案對帳）
 
 - 逐項列出失敗軸、工具失敗、未啟用的條件式關卡、無法取得的證據與未驗證前提；沒有則寫「無」。
+- `REPO_PROFILE.conventions_docs` 有路徑在 worktree 不存在時，每個缺檔一行 `conventions_docs 缺檔：<path>`（Step 3 shared prompt 已跳過它）。
 - 每項寫 `PASS / FAIL / N-A` 與理由。失敗軸不得只留在中途 log；零 finding 時仍要完整列出審查軸狀態、逐檔覆蓋、C4／spec 狀態與本節。
 - 正式 Self-Verify 修正過任何缺口時，列出 auditor 規則編號、原缺口與修正方式，並明寫「未經第二次獨立稽查」。
 ````

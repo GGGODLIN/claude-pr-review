@@ -44,6 +44,8 @@ chmod +x ~/.claude/scripts/poll-liveness.sh ~/.claude/scripts/sem-pr-blast-radiu
 
 `pr-review-c4.py` (formal-spec gate only) needs Python ≥ 3.9 and the `jsonschema` package (`pip3 install jsonschema`). Without them the gate fails on first use instead of degrading — install them, or expect to answer `SKIPPED` on spec-bearing PRs.
 
+`pr-review-profile.py` (Step 2.5, runs on every review) needs the `PyYAML` package (`pip3 install pyyaml`). It reads the optional `~/.claude/pr-review/repos.yaml`; with no file present it returns the default profile, so nothing else is required to start. Create `~/.claude/pr-review/` (with an empty `calibration/` directory) if you plan to use author calibration or a per-repo profile.
+
 `pr-review-report-projection.py` (Step 6 report publication — runs on **every** review) needs the `markdown-it-py` package (`pip3 install markdown-it-py`). It deterministically projects the full-evidence audit report into the decision-facing main report; without it Step 6 cannot publish.
 
 References are read during severity calibration on every run. `pr-review-report-projection.py` runs at Step 6 on every review; the other scripts only execute when their axis is enabled (`poll-liveness.sh` → Codex axes; `pr-review-c4.py` → formal-spec gate; `sem-pr-blast-radius.sh` → auto-skips unless [`sem`](https://github.com/Ataraxy-Labs/sem) is installed and indexed).
