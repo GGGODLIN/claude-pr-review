@@ -103,7 +103,7 @@ Calibration entries record how this author historically responds to review findi
 - `REPO_PROFILE` = private repo profile, resolved once; later steps only read its output (no profile = every field falls back to the default, behaviour identical to before):
 
   ```bash
-  REPO_PROFILE=$(python3 ~/.claude/scripts/pr-review-profile.py --remote "$(git remote get-url origin)")
+  REPO_PROFILE=$(python3 ~/.claude/scripts/pr-review-profile.py --remote "$(git -C "$(git rev-parse --show-toplevel)" remote get-url origin)")
   # JSON: trunk (null = no profile), spec_globs[], conventions_docs[], source (repos.yaml path or "default")
   ```
 
@@ -224,7 +224,7 @@ Set `SPEC_COMPLIANCE.gate=ELIGIBLE` only when at least one clause has all four:
 3. A clear actor/entity, operation/event, precondition, and observable result.
 4. A plausible intersection with an authored changed implementation flow in F, including a required behavior that may be missing from code.
 
-Quotes, examples, recommendations, rationale, goals/non-goals, historical text, deprecated clauses, informal plan/design prose, and a bare uppercase keyword do not qualify. When the flow mapping is uncertain, skip C4 rather than treating authority-sounding text as a contract.
+Quotes, examples, recommendations, rationale, goals/non-goals, historical text, deprecated clauses, informal plan/design prose, and a bare uppercase keyword do not qualify. When the flow mapping is uncertain, skip C4 rather than treating authority-sounding text as a contract. 任何 `SKIPPED` 決定之前先跑 2.65.1 取得 `NORMATIVE_SCAN`。
 
 ### 2.65.1 Scan live normative sources before finalizing SKIPPED
 
@@ -232,8 +232,10 @@ Candidates do not only come from documents the PR itself touched. A repo can hol
 
 ```bash
 # Normative sources = the openspec paths the reducer already recognises (archive excluded)
-NORMATIVE_FILES=$(git -C "$REVIEW_ROOT" ls-files 'openspec/specs/**/spec.md' 'openspec/changes/*/specs/**/spec.md' 2>/dev/null | grep -v '^openspec/changes/archive/')
-NORMATIVE_COUNT=$(printf '%s\n' "$NORMATIVE_FILES" | grep -c . || true)
+NORMATIVE_FILES=$(git -C "$REVIEW_ROOT" ls-files 'openspec/specs/**/spec.md' 'openspec/changes/*/specs/**/spec.md' 2>/dev/null | command grep -v '^openspec/changes/archive/' || true)
+NORMATIVE_COUNT=$(printf '%s\n' "$NORMATIVE_FILES" | command grep -c . || true)
+# Authored files = HEAD side of the merge-base with trunk (same set Step 2.55 labels authored); derive here, never rely on a variable from an earlier Bash call
+AUTHORED_FILES=$(git -C "$REVIEW_ROOT" diff --name-only "origin/$TRUNK_BRANCH...HEAD" 2>/dev/null || true)
 if [ -z "$REVIEW_ROOT" ] || [ ! -d "$REVIEW_ROOT" ]; then
   NORMATIVE_SCAN="scan not run: REVIEW_ROOT unavailable"
 elif [ "$NORMATIVE_COUNT" -eq 0 ]; then
@@ -244,10 +246,15 @@ else
     basename "$f" | sed -E 's/\.[^.]+$//'
     command grep -hoE 'export (default )?(async )?(const|function|class|interface|type|enum) +[A-Za-z_][A-Za-z0-9_]*' "$REVIEW_ROOT/$f" 2>/dev/null | awk '{print $NF}'
     command grep -hoE "@(Get|Post|Put|Patch|Delete|Controller)\(['\"][^'\"]+['\"]\)" "$REVIEW_ROOT/$f" 2>/dev/null | sed -E "s/.*\(['\"]([^'\"]+)['\"]\)/\1/"
-  done | sort -u | grep -E '.{6,}' | grep -vxE 'index|types|utils|constants|module|service|controller|schema|README|spec|test')   # 泛用字會撞條款裡的一般用語（實測 index.ts 撞到「TTL index」），整字比對加停用清單
-  INTERSECT=$(for spec in ${=NORMATIVE_FILES}; do
-    command grep -nE 'MUST|SHALL|NEVER' "$REVIEW_ROOT/$spec" 2>/dev/null | command grep -F -w -f <(printf '%s\n' "$AUTHORED_IDS") | sed "s|^|$spec:|"
-  done)
+  done | sort -u | command grep -E '.{6,}' | command grep -vxE 'index|types|utils|constants|module|service|controller|schema|README|spec|test' || true)   # 泛用字會撞條款裡的一般用語（實測 index.ts 撞到「TTL index」），整字比對加停用清單
+  # 空的 pattern 檔會讓 grep -f 命中每一行（實測），所以識別字為空時不做交叉、直接判 none intersect
+  if [ -z "$AUTHORED_IDS" ]; then
+    INTERSECT=""
+  else
+    INTERSECT=$(for spec in ${=NORMATIVE_FILES}; do
+      command grep -nE 'MUST|SHALL|NEVER' "$REVIEW_ROOT/$spec" 2>/dev/null | command grep -F -w -f <(printf '%s\n' "$AUTHORED_IDS") | sed "s|^|$spec:|"
+    done || true)
+  fi
   if [ -z "$INTERSECT" ]; then
     NORMATIVE_SCAN="normative sources scanned, none intersect (scanned $NORMATIVE_COUNT)"
   else
@@ -274,7 +281,7 @@ Before a candidate can enter the clause inventory, pass it through the determini
 printf '%s' "$C4_AUTHORITY_INPUT_JSON" | python3 ~/.claude/scripts/pr-review-c4.py resolve-authority > "$C4_AUTHORITY_OUTPUT_JSON"
 ```
 
-`C4_AUTHORITY_INPUT_JSON` contains `review_root=$REVIEW_ROOT` and one candidate with one contiguous exact quote, source excerpt, path, line range, contract type, and changed-flow hint. Split separated normative sentences into separate clause IDs; never join non-contiguous quotes with `/` or prose. Only `status=RESOLVED` may continue. A current spec keeps its verified path; unpromoted `openspec/changes/<name>/specs/**` delta specs are also accepted as authority and keep their own verified path (reason `C4_CHANGE_DELTA_AUTHORITY_RESOLVED`), and the report's 「Spec 依據」 must state that the authority is an unpromoted change delta authored inside the PR when that is the case; `openspec/changes/archive/**` is an alias only and must resolve from its complete `### Requirement:` block to exactly one byte-identical block under `openspec/specs/**`. Use the reducer-returned canonical path, line range, source excerpt, and source hash in every downstream structure. Zero live matches, multiple live matches, a non-unique canonical quote, a stale line anchor, a missing path, or a root escape finalizes that candidate with the reducer's stable reason code. If no candidate survives, finalize `SKIPPED`; never dispatch from an archived alias or from main-session inference that a change was probably promoted.
+`C4_AUTHORITY_INPUT_JSON` contains `review_root=$REVIEW_ROOT` and one candidate with one contiguous exact quote, source excerpt, path, line range, contract type, and changed-flow hint. Split separated normative sentences into separate clause IDs; never join non-contiguous quotes with `/` or prose. Only `status=RESOLVED` may continue. A current spec keeps its verified path; unpromoted `openspec/changes/<name>/specs/**` delta specs are also accepted as authority and keep their own verified path (reason `C4_CHANGE_DELTA_AUTHORITY_RESOLVED`), and the report's 「Spec 依據」 must state that the authority is an unpromoted change delta authored inside the PR when that is the case; `openspec/changes/archive/**` is an alias only and must resolve from its complete `### Requirement:` block to exactly one byte-identical block under `openspec/specs/**`. Use the reducer-returned canonical path, line range, source excerpt, and source hash in every downstream structure. Zero live matches, multiple live matches, a non-unique canonical quote, a stale line anchor, a missing path, or a root escape finalizes that candidate with the reducer's stable reason code. If no candidate survives, finalize `SKIPPED`（reason text 取 2.65.1 的 `NORMATIVE_SCAN`；沒先跑 2.65.1 就不得 finalize）; never dispatch from an archived alias or from main-session inference that a change was probably promoted.
 
 Build a clause inventory before Step 3:
 
@@ -300,7 +307,7 @@ clauses:
     changed_flow_hint: <actor + operation + precondition + result>
 ```
 
-At this stage, every receipt sets `requested_model=opus` and `effort=xhigh`. `ELIGIBLE` sets `dispatch=PENDING`, `dispatch_count=0`, and `observed_model=UNAVAILABLE`; it authorizes one later whole-PR attempt but does not launch it. `SKIPPED` finalizes `dispatch=NOT_APPLICABLE`, `dispatch_count=0`, and `observed_model=UNAVAILABLE` while preserving a non-empty stable `reason_code`. Continue through Step 2.95 and provenance; immediately before Step 3 dispatch, deterministically re-check every reducer-resolved candidate against authoritative F, hunk-level provenance, and the chunk map. Keep only clauses whose actor/entity, operation/event, precondition, observable result, authored-flow intersection, canonical quote, line range, and source hash all match; if none survive, finalize `SKIPPED` rather than dispatching on a merely plausible mapping. Step 3 then assembles the trusted packet, performs the single dispatch attempt, generates the runtime receipt and validated human projection through `~/.claude/scripts/pr-review-c4.py`, and finalizes the receipt as `DISPATCHED` or `FAILED`. A failed agent never gets a replacement dispatch.
+At this stage, every receipt sets `requested_model=opus` and `effort=xhigh`. `ELIGIBLE` sets `dispatch=PENDING`, `dispatch_count=0`, and `observed_model=UNAVAILABLE`; it authorizes one later whole-PR attempt but does not launch it. `SKIPPED` finalizes `dispatch=NOT_APPLICABLE`, `dispatch_count=0`, and `observed_model=UNAVAILABLE` while preserving a non-empty stable `reason_code`. Continue through Step 2.95 and provenance; immediately before Step 3 dispatch, deterministically re-check every reducer-resolved candidate against authoritative F, hunk-level provenance, and the chunk map. Keep only clauses whose actor/entity, operation/event, precondition, observable result, authored-flow intersection, canonical quote, line range, and source hash all match; if none survive, finalize `SKIPPED` rather than dispatching on a merely plausible mapping（同樣先跑 2.65.1、reason text 帶掃描三態）. Step 3 then assembles the trusted packet, performs the single dispatch attempt, generates the runtime receipt and validated human projection through `~/.claude/scripts/pr-review-c4.py`, and finalizes the receipt as `DISPATCHED` or `FAILED`. A failed agent never gets a replacement dispatch.
 
 ## Step 2.7: Prepare Search Path (before review)
 
@@ -503,7 +510,8 @@ Step 3 執行時透過兩個機制注入到 codex：
 - [ ] 跑 Step 2.95 deterministic change inventory（建 F + 決定 chunked 與否，>15 檔或 >800 行強制切塊）
 - [ ] 跑 Step 2.96 opt-in 詢問要不要加 Pro（2 選 1 → `$EXTRA_AXES`；**user 無回應 → `$EXTRA_AXES="flash"` 預設只跑 Flash、不跳過**）
 - [ ] 跑 Step 2.98 Codex preset 選擇（5 選 1 → `$CODEX_PRESET` + `$CODEX_MODEL` / `$CODEX_NEUTRAL_EFFORT` / `$CODEX_ADVERSARIAL_EFFORT` 三個變數；**user 無回應 → default、不跳過**）
-- [ ] 跑 Step 2.55 provenance 判定（base ≠ master 時；inherited 檔清單注入 reviewer prompt、Step 5 分級 cap 參考用）
+- [ ] 跑 Step 2.55 provenance 判定（一律跑；base = trunk 時結果全 authored；inherited 檔清單注入 reviewer prompt、Step 5 分級 cap 參考用）
+- [ ] 先跑 Step 2.65.1 normative 掃描取得 `NORMATIVE_SCAN`，再由 2.65 finalize（`SKIPPED` 帶三態 reason text）
 - [ ] 派 Opus reviewers（含 2.8 baseline + 2.9 輸出注入 + 2.95 chunked dispatch 若觸發 + 2.55 provenance 清單）
 - [ ] 在 F、provenance 與 chunk map 已完成後才完成 Step 2.65 C4 receipt：`ELIGIBLE` → assemble trusted packet + exactly one `spec-compliance-reviewer` dispatch attempt；`SKIPPED` → `dispatch_count=0`；不得 chunk、不得補派
 - [ ] 跑 Codex config 前置 mutation（pristine backup `.pr-review-bak` + 剝除 `[mcp_servers.*]` + effort sed；見 Codex Review「config 前置 mutation」段——**`-c 'mcp_servers={}'` 非確定性生效、不能取代這步**；Step 7 restore 對應）
@@ -699,7 +707,7 @@ echo "$ROLLOUTS"
 ~/.claude/scripts/poll-liveness.sh poll \
   --pgrep "codex review" --success '"type":"task_complete"' \
   --deadline 540 ${=ROLLOUTS}
-# ${=ROLLOUTS}：zsh 預設不對變數做 word split，裸 $ROLLOUTS 會把多行路徑當成一個參數、poll 找不到檔回假 STUCK_SUSPECT；${=VAR} 在 zsh 強制切詞、bash 下等同 $VAR
+# ${=ROLLOUTS}：zsh 預設不對變數做 word split，裸 $ROLLOUTS 會把多行路徑當成一個參數、poll 找不到檔回假 STUCK_SUSPECT；${=VAR} 是 zsh 專用語法，bash／sh 下會 bad substitution 直接失敗——本流程的 Bash tool 是 zsh；要在 bash 跑改用 IFS=$'\n' 加裸 $VAR
 # exit 0 DONE → 接下方「Finish → 讀 token + verdict」
 # exit 1 STILL_RUNNING → 下輪 Bash tool call 重跑本段（上限估 3-4 輪、deep preset 5-6 輪）
 # exit 2 DEAD → codex 靜默死亡（token 已沉沒）：看 $LOG 尾判死因、retry 一次（config 層已剝 MCP 仍死 → 報告註明缺軸）
@@ -1273,7 +1281,7 @@ This is the deterministic positioning borrowed from open-code-review's tracking 
 
 ## 變更概要
 
-Per-file table: filename, change type, description（Step 2.55 有 inherited 檔時加 provenance 欄，段首標明 authored/inherited 分佈 + 驗證方法一行；base = master 則免）
+Per-file table: filename, change type, description（Step 2.55 有 inherited 檔時加 provenance 欄，段首標明 authored/inherited 分佈 + 驗證方法一行；base = trunk 時寫 N authored / 0 inherited）
 
 ## React-doctor 機械掃描
 

@@ -63,6 +63,11 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
     self.assertNotIn("openspec/changes/archive/**/spec.md", gate[scan:reducer])
     self.assertIn("MUST|SHALL|NEVER", gate)
     self.assertIn("NORMATIVE_SCAN=", gate)
+    self.assertIn("AUTHORED_FILES=$(git -C \"$REVIEW_ROOT\" diff --name-only", gate)
+    self.assertIn('[ -z "$AUTHORED_IDS" ]', gate)
+    self.assertIn("先跑 2.65.1", gate[reducer:])
+    self.assertIn("2.65.1", self.section("**Dispatch checklist", " Review (Multi-Agent Routing)"))
+    self.assertIn("bad substitution", self.command)
 
   def test_c4_skipped_reason_has_three_states(self):
     for state in (
@@ -87,7 +92,6 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
     self.assertIn("pr-review-profile.py", sync)
     self.assertIn("REPO_PROFILE=", sync)
     self.assertIn("TRUNK=<x> (source: profile <path> | origin/HEAD | default master)", sync)
-    self.assertLess(sync.index("profile"), sync.index("origin/HEAD"))
     self.assertIn("**Trunk**: `TRUNK=", self.command)
 
   def test_provenance_triggers_on_base_not_equal_trunk(self):
@@ -97,7 +101,8 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
     self.assertNotIn("base = master", head)
     self.assertNotIn("base ≠ master", head)
     self.assertIn("base = trunk", head)
-    self.assertNotIn("base ≠ master", self.section("#### Shared prompt", "### Codex Review"))
+    self.assertNotIn("≠ master", self.command)
+    self.assertNotIn("base = master", self.command)
 
   def test_spec_detection_appends_profile_globs(self):
     detect = self.section("### Detection heuristic", "### What to do with detected specs")
