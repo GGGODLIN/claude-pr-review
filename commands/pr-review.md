@@ -283,7 +283,7 @@ grep -n "foo" "$REVIEW_ROOT/src/server/handlers.ts"
 
 ## Step 2.55: Authored vs Inherited Provenance（base ≠ trunk 時必跑）
 
-**為什麼**：hotfix branch 從 trunk 切、PR 打 pre-production 時，diff 會夾帶「trunk 有、pre-production 還沒有」的內容——這些檔不是 PR 作者寫的、已在各自原 PR 審過。不判 provenance 的後果（實測）：11 檔裡 10 檔是 inherited，cross-axis CONFIRMED 的 inherited 缺陷會被誤標 Must Fix、貼到無辜作者頭上。
+**為什麼**：hotfix branch 從 trunk 切、PR 打 pre-production 時，diff 會夾帶「trunk 有、pre-production 還沒有」的內容——這些檔不是 PR 作者寫的、已在各自原 PR 審過。不判 provenance 的後果：hotfix 的 diff 可以絕大多數都是 inherited，cross-axis CONFIRMED 的 inherited 缺陷會被誤標 Must Fix、貼到無辜作者頭上。
 
 **Trigger**：`BASE_BRANCH` ≠ `TRUNK_BRANCH`（Step 2.5 解析出的主幹；hotfix→pre-production 這類 PR 就是這型）。base = trunk 的一般 PR → 本步照跑、結果自然全 authored，報告 header 標「provenance: N authored / 0 inherited（base = trunk）」，不要寫 N-A——N-A 會讓讀者分不出「沒跑」與「跑了沒 inherited」。
 
@@ -592,7 +592,7 @@ Deterministic CLI = same output every run → do **NOT** inject results into any
 | `opus`／`spec-compliance-reviewer` | — | — | 可選；只在 `gate=ELIGIBLE` 且 evidence requirements 通過 | — | — | — | — | — |
 | `$CODEX_MODEL`／bare `codex review` | — | — | — | 可選；diff-only | — | — | — | — |
 | `$CODEX_MODEL`／companion `adversarial-review` | — | — | — | — | 可選；diff-only | — | — | — |
-| `$GEMINI_FLASH_MODEL`／`agy` | — | — | — | — | — | 可選；model id 由 routing 取得 | — | — |
+| `$GEMINI_FLASH_MODEL`／`agy` | — | — | — | — | — | 可選；**本 repo 預設 `recommended`**，model id 由 routing 取得 | — | — |
 | `Gemini 3.1 Pro (High)`／`agy` | — | — | — | — | — | — | 可選 | — |
 | web GPT Pro／`opencli chatgpt` | — | — | — | — | — | — | — | 可選；實驗性既有路徑 |
 
@@ -624,7 +624,7 @@ Codex preset 只替已 `selected` 的 Codex cell 設定 model／effort，不選�
 
 只有至少一個 Codex cell 已 `selected` 時才設定 `$CODEX_PRESET` 及其三個變數；preset 不再代表「一定含對抗軸」。`$EXTRA_AXES` 只由已 `selected` 的 Gemini cell 投影而來，可為空，不是選擇權威。模型識別只沿用現有設定與 runtime receipt；logical alias 無法解析時在報告寫 `UNAVAILABLE`。
 
-**加選軸（只有 `web GPT Pro` cell 是 `selected` 時才啟動）**：「要不要加跑 web GPT Pro 對抗軸？（實驗性；`opencli chatgpt ask` 走 ChatGPT 訂閱、Pro 深思考；資料面 Codex ≡ web GPT）」。選定後射 `opencli chatgpt ask "<對抗 review 指令 + diff>" --new --wait false --window background -f json`，合成前先背景 sleep 再用 `opencli chatgpt detail <id> --markdown true -f json` 收，沒抓到就再抓一次，findings 標 `[web-Pro]`，不與 Codex 軸合併；burn test 未做前每次在報告註 wall-clock 與是否撞訂閱額度。⚠️ **不要對 detail 用 `--wait true`**：實測 web Pro 花 **17m18s** 才開始輸出，而 `--stable` 在它吐第一個字前永遠等不到穩定——`--timeout 600` 與 `--timeout 240` 兩次都回 `TIMEOUT`，同一時間不帶 `--wait` 直接抓就拿得到當前內容。收指定對話一律用 `detail`，不用 `read --conversation`（`read` 不吃該參數、只讀當前對話）。
+**加選軸（只有 `web GPT Pro` cell 是 `selected` 時才啟動）**：「要不要加跑 web GPT Pro 對抗軸？（實驗性；`opencli chatgpt ask` 走 ChatGPT 訂閱、Pro 深思考；資料面 Codex ≡ web GPT）」。選定後射 `opencli chatgpt ask "<對抗 review 指令 + diff>" --new --wait false --window background -f json`，合成前先背景 sleep 再用 `opencli chatgpt detail <id> --markdown true -f json` 收，沒抓到就再抓一次，findings 標 `[web-Pro]`，不與 Codex 軸合併；burn test 未做前每次在報告註 wall-clock 與是否撞訂閱額度。⚠️ **不要對 detail 用 `--wait true`**：實測 web Pro 可能十幾分鐘後才開始輸出，而 `--stable` 在它吐第一個字前永遠等不到穩定——`--timeout 600` 與 `--timeout 240` 兩次都回 `TIMEOUT`，同一時間不帶 `--wait` 直接抓就拿得到當前內容。收指定對話一律用 `detail`，不用 `read --conversation`（`read` 不吃該參數、只讀當前對話）。
 
 ### 2.98.1 Multi-target finalize：整組一次選席與容量裁決（多目標才跑）
 
@@ -809,7 +809,7 @@ git -C "$REVIEW_ROOT" rev-parse HEAD
 
 ⚠️ **必須在子 shell 內 `(cd "$REVIEW_ROOT" && …)` 起跑**——`codex review` 看 HEAD 的 cwd。在主 repo cwd 跑就走主 repo HEAD（user 當前 branch、跟 PR 無關）；子 shell 讓 `cd` 不外漏到後續 Bash call（見 2.5.3 的 cwd 殘留說明）。
 
-⚠️ **不要用前景 `--wait`**——CC Bash tool 上限 10 min 硬 clamp、Sol xhigh 中大型 PR 就撞（前景第 10 分鐘被 SIGTERM kill、rollout 停在 419KB）。改用 subshell + nohup detach + rollout jsonl `task_complete` event poll 判 finish。
+⚠️ **不要用前景 `--wait`**——CC Bash tool 上限 10 min 硬 clamp、Sol xhigh 中大型 PR 就撞（前景第 10 分鐘被 SIGTERM kill、rollout 半途中斷）。改用 subshell + nohup detach + rollout jsonl `task_complete` event poll 判 finish。
 
 **⚠️ Codex config 前置 mutation（起任何 codex 軸之前一次做完、Step 7 統一 restore）**：兩件事都要動 `~/.codex/config.toml`——(1) **剝除 MCP servers**：`-c 'mcp_servers={}'` 已實證**非確定性生效**（實測同一組 flag 有時被吃、有時 semble 照樣啟動並讓中性軸 wedge 沉沒數萬 token，差異原因未明）——config 層剝除才可靠；(2) **effort override**（companion 無 per-run flag、bare review 的 `-c model_reasoning_effort` 實效未驗證——當時無對照組）。
 
@@ -914,7 +914,7 @@ tail -80 "$LOG"
 
 **原則**（不變）：
 
-- `codex review` already carries its own review prompt contract and output schema — the native review task's own rubric output（JSON findings、`code_location.absolute_file_path`、overall correctness verdict）. **Do NOT author a custom prompt, and do NOT append focus text** — codex plugin ≥ 1.0.2 hard-errors on trailing prompt text（on）. Run it bare. Spec/scope context reaches Codex only through files in the checkout — it does read repo files. ⚠️ 這份輸出契約是**原生 review rubric**，不是 plugin 對抗軸那份 `verdict`／`summary`／`findings`／`next_steps` schema；該 schema 只屬對抗軸，見下方多目標對抗軸段。
+- `codex review` already carries its own review prompt contract and output schema — the native review task's own rubric output（JSON findings、`code_location.absolute_file_path`、overall correctness verdict）. **Do NOT author a custom prompt, and do NOT append focus text** — codex plugin ≥ 1.0.2 hard-errors on trailing prompt text. Run it bare. Spec/scope context reaches Codex only through files in the checkout — it does read repo files. ⚠️ 這份輸出契約是**原生 review rubric**，不是 plugin 對抗軸那份 `verdict`／`summary`／`findings`／`next_steps` schema；該 schema 只屬對抗軸，見下方多目標對抗軸段。
 - **When checkout is possible, do NOT route Codex review through `codex:codex-rescue` or `codex task`.** Those modes wrap Codex in a generic task/rescue prompt and lose the built-in review contract, forcing you to re-author the contract yourself in XML tags — 品質 不會 更好. (Exception: see Fallback below.)
 
 #### Restore
@@ -1063,13 +1063,13 @@ sqlite3 ~/.codex/logs_2.sqlite "SELECT feedback_log_body FROM logs WHERE thread_
 
 **Trigger**：Gemini Pro 與 Gemini Flash 都是矩陣中的可選 cell；只有對應 cell `status=selected` 才啟動。`$EXTRA_AXES` 只是已選 Gemini cell 的相容性投影，空值代表本輪沒有選 Gemini。
 
-**目的**：沿用既有 Gemini 路徑，提供獨立觀點；既有 trial 觀察只用來說明推薦理由，不是模型品質排名，也不會把 Flash 或 Pro 變成強制席位。詳見。
+**目的**：沿用既有 Gemini 路徑，提供獨立觀點；既有 trial 觀察只用來說明推薦理由，不是模型品質排名，也不會把 Flash 或 Pro 變成強制席位。
 
 **並行 dispatch**：只有兩個以上 Gemini cell 都是 `selected` 時才並行；每個 cell 的啟動與等待都以 `REVIEW_SELECTION`／`$EXTRA_AXES` 的實際成員為 guard。未選定、cancelled 或 unavailable 的 cell 不啟動。
 
 **Invocation**：沿用既有 `agy` pattern；先取得 routing model，再只執行已 selected 的 command。下方 guarded block 是唯一啟動形狀：
 
-**v1.0.12 gotcha workaround**（）：
+**v1.0.12 gotcha workaround**：
 
 - ✅ **`--model=` / `--print=` 等號綁**：避開 Go flag parser 的 greedy-consume bug（`-p "X" --flag` 會把 `--flag` 當 `-p` value、prompt 被吃掉）
 - ✅ **`--add-dir "$REVIEW_ROOT"` 必加**：沒 active workspace 時 agy 把 prompt 當「請說明 CLI 參數」處理
@@ -1202,7 +1202,7 @@ Task: verify whether this is a real gap.
 1. If spec is attached and explicitly marks this concern as out-of-scope or non-goal → output "OUT_OF_SCOPE" with the spec quote.
 2. Use Grep to search for related patterns in this codebase (e.g. how similar concerns are handled elsewhere, upstream middleware, existing utilities, test coverage). If a semantic-search MCP is available per Step 2.7, you may use it in addition.
 2.5. **Baseline-comparable test**: 用同樣搜法找 codebase / framework default / 上游 lib 內**既有的同類處理 pattern**。若同 pattern 多處長期存在且未爆 → 問「為什麼這條會炸、那些位置不會？」答得出實質差異（這條多了某 user-controlled input source / 某 trust boundary 變化 / spec 範圍變動）→ 維持原 verdict 並把差異寫進 evidence；答不出實質差異 → 標 REFUTED 並引「同 pattern 平行 N 處長期未爆」當證據。借鑑 Cloudflare security-audit-skill baseline test、擋掉「理論上會炸」但同 pattern codebase 到處在用的 false positive。
-2.6. **Runtime-assertion trace**（僅適用主張「會 crash / 按了沒反應 / render undefined」型 finding）: 追斷言依賴的周邊機制——form-library defaultValues 是否已供值、按鈕是否在 `<form>` 內靠預設 `type=submit` 觸發上層 onSubmit、library 內部實際行為是否如 finding 描述。機制已覆蓋該行為 → 標 REFUTED 並引 file:line 證據（實證：defaultValues 已給 `additionalEntries: {}`、button 走 native form submit — 兩條 Must Fix 誤報都栽在這）。
+2.6. **Runtime-assertion trace**（僅適用主張「會 crash / 按了沒反應 / render undefined」型 finding）: 追斷言依賴的周邊機制——form-library defaultValues 是否已供值、按鈕是否在 `<form>` 內靠預設 `type=submit` 觸發上層 onSubmit、library 內部實際行為是否如 finding 描述。機制已覆蓋該行為 → 標 REFUTED 並引 file:line 證據（實證：表單預設值與 native form submit 這兩種機制，各讓一條 Must Fix 誤報成立）。
 3. Output one of:
    - "CONFIRMED": search found no coverage; Codex's concern is valid. Attach search-proof (query + what you found).
    - "REFUTED": search found the concern is already handled elsewhere at file:line. Attach the proof.
@@ -1362,9 +1362,9 @@ Output per finding：`baseline: 慣例支持 / 慣例衝突 / 無先例` + `scop
 
 ### 4.3b Lone finding — 判斷式複查
 
-**Lone finding 定義**：恰好一軸 flag、且無其他軸 flag 同 hunk / 同根因（同 hunk 的不同失效模式算 corroboration、不算 lone—— #1/#2 先例）。
+**Lone finding 定義**：恰好一軸 flag、且無其他軸 flag 同 hunk / 同根因（同 hunk 的不同失效模式算 corroboration、不算 lone）。
 
-**不要機械降級**。軸間互補率高的場次（實測 87% findings 是 lone、含全場最重的 CONFIRMED HIGH），「他軸沉默」是弱證據。改走判斷：
+**不要機械降級**。軸間互補率高的場次（實測可有近九成 findings 是 lone、且含全場最重的 CONFIRMED HIGH），「他軸沉默」是弱證據。改走判斷：
 
 1. 先算 `effective_severity = corrected_severity ?? original_severity`；原始 severity 只留在報告對照欄。**安全類 finding 再用 `~/.claude/references/severity-calibration.md` 的矩陣核一次**——Codex / Gemini 軸沒讀過該表，其 `corrected_severity` 高於矩陣值時取矩陣值，並在備註寫「矩陣校準：<原值> → <矩陣值>，四格事實 = …」。矩陣值較高則維持 `effective_severity`（矩陣是降噪工具，不拿來升級）。
 2. 該 finding 的 4.1/4.2 驗證 verdict 是 **CONFIRMED** → 保持 `effective_severity`，在報告該條備註一行「lone finding、他軸為何漏」的合理解釋（例：diff-only 軸看不到跨檔交互 / 該軸沒讀 library source）。解釋得出來就結案。
@@ -1740,7 +1740,7 @@ Weighted by verification verdict, but **all findings from selected cells are sti
 
 ### Must Fix（合併前必修）
 
-下列四類是 Must Fix **候選來源**（信心面），每條候選仍要過 skill 6d-3 雙半條件（具體 user-visible 重現路徑 + **不修就壞「會出貨的東西」**：runtime 行為 / 資料正確性 / build・CI pipeline）才落 Must——consensus 不是 severity floor，不阻擋發布的 consensus 條（死測試 / 死 config / 文件與 code 不符）落 Should Fix（#3 拍板回寫；strict-liability 豁免照舊）：
+下列四類是 Must Fix **候選來源**（信心面），每條候選仍要過 skill 6d-3 雙半條件（具體 user-visible 重現路徑 + **不修就壞「會出貨的東西」**：runtime 行為 / 資料正確性 / build・CI pipeline）才落 Must——consensus 不是 severity floor，不阻擋發布的 consensus 條（死測試 / 死 config / 文件與 code 不符）落 Should Fix（strict-liability 豁免照舊）：
 
 - Consensus findings (a selected CC cell and a selected Codex／Gemini／web GPT cell flag the same issue, not refuted)
 - CRITICAL severity from a selected reviewer (strict-liability always here)
@@ -1878,7 +1878,7 @@ Bitbucket 必須依下列順序執行；不得把 scope 回答當成批次確認
 
 1. **Foreign-author preflight**：先用只含 `workspace`、`repo`、`pr_id` 與可選 drafts、沒有 `operations` 的 input 呼叫 `bitbucket-pr-mutation preview --mode existing --input ...`。同一 preview command 會走內部唯讀 preflight，refetch actor、author、repository UUID、current source／destination full SHA、branches、state 與 description，不要求 review basis 或 operations。`READY_FOR_PROPOSAL`（自己的 PR 且 OPEN）→ 全部 operation 可用，接 Scope。`READY_FOR_COMMENT_ONLY`（他人 PR 或 state ≠ OPEN）→ **comment 類照常接 Scope**，但 Scope 只能提供 `create_inline_comment` / `create_pr_comment`；`update_description` 一律不列入、不提供 override。批次內混入 description operation 時 preview 會整批退回 `READ_ONLY_FOREIGN_AUTHOR` / `READ_ONLY_PR_NOT_OPEN`，此時只輸出草稿並停止。
 2. **Scope**：只有 preflight 證明可繼續後，讓使用者選 `Must Fix only`／`Must + Should Fix`／`All`，以及是否加入 PR-level summary。Scope 只篩選 stable `finding_uid`，不是 exact batch confirmation。
-3. **Operations**：依選定 `finding_uid` 建立 `create_inline_comment`／`create_pr_comment` operations。人類看到 `display_ordinal`，proposal ownership 仍使用 `finding_uid`。Post 版本才 prepend `**[Must Fix]**`／`**[Should Fix]**`／`**[Nice to Have]**`；report 內文不加 tag。<br>**建 operation 之前逐條過未驗證前提閘**：拿報告結尾「沒做的部分」／備註裡標為未驗證的項目，對照這次選中的每一條 finding。某條 finding 的支點落在該清單上 → 三選一，**不得直接貼**：(a) 現在補驗（main session 的 MCP／WebFetch／實跑都可用，reviewer subagent 當時查不到不代表現在查不到）；(b) 把「未確認 X」原樣寫進留言本文，不改寫成肯定句；(c) 從這批拿掉。<br>為什麼要卡在這裡：報告裡標好的 hedge 會在「報告 → PR 留言」這一步蒸發 —— 留言是重寫的，不是複製的，重寫時最容易把「未確認」寫成斷言。 實證：`routes.storefront_login_url` 的行為連續被 4 個階段標為未驗證（兩個 reviewer 軸、4.1 複查、報告結尾），貼出去時變成一句肯定句，作者一句話就推翻。
+3. **Operations**：依選定 `finding_uid` 建立 `create_inline_comment`／`create_pr_comment` operations。人類看到 `display_ordinal`，proposal ownership 仍使用 `finding_uid`。Post 版本才 prepend `**[Must Fix]**`／`**[Should Fix]**`／`**[Nice to Have]**`；report 內文不加 tag。<br>**建 operation 之前逐條過未驗證前提閘**：拿報告結尾「沒做的部分」／備註裡標為未驗證的項目，對照這次選中的每一條 finding。某條 finding 的支點落在該清單上 → 三選一，**不得直接貼**：(a) 現在補驗（main session 的 MCP／WebFetch／實跑都可用，reviewer subagent 當時查不到不代表現在查不到）；(b) 把「未確認 X」原樣寫進留言本文，不改寫成肯定句；(c) 從這批拿掉。<br>為什麼要卡在這裡：報告裡標好的 hedge 會在「報告 → PR 留言」這一步蒸發 —— 留言是重寫的，不是複製的，重寫時最容易把「未確認」寫成斷言。實證：某個平台路由的行為連續被四個階段標為未驗證（兩個 reviewer 軸、4.1 複查、報告結尾），貼出去時變成一句肯定句，作者一句話就推翻。
 4. **Stale inline fallback／re-anchor new proposal**：再次 refetch continuity 與 base changed。`review_context_changed=true` 時，舊 anchor 預設轉成 PR-level comment，第一行保留 reviewed SHA 與原 path／line 並標「未重新驗證」。若使用者仍要 inline，必須對 current diff 重定位並驗證 anchor，然後建立 new proposal；不得沿用舊 proposal 或把 `inline.from` 偷換成同號 `inline.to`。
 5. **Proposal preview**：把 reviewed source／destination SHA 與非空 operations 寫入 candidate，呼叫 `bitbucket-pr-mutation preview --mode existing --input ...`。此步重新 refetch 並驗證 review basis、continuity、operation allowlist 與 request body（含憑證掃描）；只有 `READY` 可續行。
 6. **Display**：依 `bitbucket-pr-mutation` 的 ceremony tier 決定顯示深度。PR review 的發 comment 屬 **comment-only batch** → 精簡顯示（每個 operation 的 `path:line` + 逐字 comment 內文）、**不派 Self-Verify subagent**；hash 與 batch ID 照常計算並綁進 approval、只是不讀出來。批次若混入 `update_description` → 走 heavyweight，顯示完整 exact proposal 並跑 Self-Verify。此時仍不 write。

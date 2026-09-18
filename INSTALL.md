@@ -39,7 +39,8 @@ Two things to adjust to your own setup:
 mkdir -p ~/.claude/references ~/.claude/scripts
 cp references/*.md ~/.claude/references/
 cp scripts/* ~/.claude/scripts/
-chmod +x ~/.claude/scripts/poll-liveness.sh ~/.claude/scripts/sem-pr-blast-radius.sh
+chmod +x ~/.claude/scripts/poll-liveness.sh ~/.claude/scripts/sem-pr-blast-radius.sh ~/.claude/scripts/model-routing.sh
+cp model-routing.env ~/.claude/
 ```
 
 `pr-review-c4.py` (formal-spec gate only) needs Python ≥ 3.9 and the `jsonschema` package (`pip3 install jsonschema`). Without them the gate fails on first use instead of degrading — install them, or expect to answer `SKIPPED` on spec-bearing PRs.
@@ -111,9 +112,10 @@ The mutation package requires **Python ≥ 3.10** (uses `zip(strict=True)` and P
 
 ```bash
 # All configurations
-ls ~/.claude/commands/pr-review.md ~/.claude/references/finding-severity-rules.md ~/.claude/references/severity-calibration.md
+ls ~/.claude/commands/pr-review.md ~/.claude/references/finding-severity-rules.md ~/.claude/references/severity-calibration.md ~/.claude/model-routing.env
 ls ~/.claude/agents/{typescript,python,code,security,spec-compliance}-reviewer.md ~/.claude/agents/skill-verify-auditor.md   # all 6 exist
 test -x ~/.claude/scripts/poll-liveness.sh && test -x ~/.claude/scripts/sem-pr-blast-radius.sh && echo "scripts ok"
+ls ~/.claude/scripts/pr-review-targets.py ~/.claude/scripts/pr-review-group-report.py ~/.claude/scripts/pr-review-cc-group-flow.py ~/.claude/scripts/pr-review-codex-set.mjs ~/.claude/scripts/pr-review-gemini-web.py ~/.claude/scripts/model-routing.sh
 command -v gh   # GitHub PRs
 
 # Report projection (required — Step 6 publication)
@@ -138,7 +140,7 @@ command -v npx
 python3 -c 'import sys; assert sys.version_info >= (3, 10); print("bitbucket adapter python ok")'
 ```
 
-Then run a smoke review on a small real PR: `/pr-review <URL of a 1-3 file PR>`. Expect: worktree created under `.worktrees/review-pr-<id>`, the two preset questions (Gemini Pro opt-in, Codex preset — answer with defaults), a report Self-Verify pass, then two zh-TW reports at `<repo-root>`: the decision-facing `pr-<id>-review.md` plus the full-evidence `pr-<id>-review.audit.md`, and the worktree cleaned up afterwards. Missing optional axes appear as noted gaps in the report header.
+Then run a smoke review on a small real PR: `/pr-review <URL of a 1-3 file PR>`. Expect: a worktree created under `.worktrees/review-pr-<id>`; the Step 2.98 selection matrix printed with a recommendation per cell, waiting for your choice (answering "照推薦" takes the recommended set — note that leaving it unanswered selects nothing and dispatches no reviewer); a report Self-Verify pass; then two zh-TW reports under `~/.claude/pr-review-reports/<repo>/`: the decision-facing `pr-<id>-review.md` plus the full-evidence `pr-<id>-review.audit.md`; and the worktree cleaned up afterwards. Missing optional axes appear as noted gaps in the report header.
 
 Bitbucket installs: additionally run the contract tests once — `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q` (expect `OK`, one skip is normal).
 
