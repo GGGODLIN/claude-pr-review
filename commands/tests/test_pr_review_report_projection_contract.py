@@ -22,7 +22,7 @@ class PrReviewReportProjectionContractTest(unittest.TestCase):
   def test_step_five_defines_audit_as_canonical_and_main_as_projection(self):
     self.assertIn("拍板主報告＋完整證據副檔", self.command)
     self.assertIn("完整證據副檔是 Step 5 完整報告的 canonical copy", self.command)
-    self.assertIn("**Report projection schema**: 1", self.report_structure)
+    self.assertIn("**Report projection schema**: 2", self.report_structure)
     self.assertIn("**Report generation**: sha256:<64-hex>", self.command)
     self.assertIn("F-01 finding_uid: <20-hex> action=<action>", self.report_structure)
     self.assertIn("inline=none", self.report_structure)
@@ -56,6 +56,28 @@ class PrReviewReportProjectionContractTest(unittest.TestCase):
     self.assertNotIn("fable-shadow-ledger.jsonl", self.command)
     self.assertNotIn("skipped-chunked", self.command)
     self.assertNotRegex(self.command, re.compile(r'["\']?model["\']?\s*:\s*["\']?fable["\']?', re.IGNORECASE))
+
+  def test_report_is_projected_from_the_selected_set(self):
+    for marker in (
+      "只投影 `REVIEW_SELECTION` 中 `status=selected` 的席位",
+      "cancelled、not-selected、unavailable、needs-material 不得列為 PASS 或必須完成",
+      "失敗席位保留 `FAILED`，不得改寫成 PASS、成功或另一個模型",
+      "只有選定的初次模型／角度才進入審查工具、Reviewer models 與發現總覽欄",
+      "selected set",
+    ):
+      with self.subTest(marker=marker):
+        self.assertIn(marker, self.command)
+
+  def test_report_preserves_conditional_qualification_and_single_seat_state(self):
+    for marker in (
+      "Formal spec gate 的 `gate=ELIGIBLE` 與 evidence requirements",
+      "所有初次結果仍須既有查證與 Main 裁決",
+      "選定單席就以單席報告",
+      "取消初次 reviewer 不算未完成，也不算已完成",
+      "模型識別未知就寫 `UNAVAILABLE`",
+    ):
+      with self.subTest(marker=marker):
+        self.assertIn(marker, self.command)
 
 
 if __name__ == "__main__":

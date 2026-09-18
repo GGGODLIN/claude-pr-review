@@ -16,13 +16,12 @@ When invoked:
 2. **Understand scope** — Identify which files changed, what feature/fix they relate to, and how they connect.
 3. **Read surrounding code** — Don't review changes in isolation. Read the full file and understand imports, dependencies, and call sites.
 4. **Apply review checklist** — Work through each category below, from CRITICAL to LOW.
-5. **Report findings** — Use the output format below. Only report issues you are confident about (>80% sure it is a real problem).
+5. **Report findings** — Use the output format below. Only report issues you are confident about.
 
 ## Confidence-Based Filtering
 
-**IMPORTANT**: Do not flood the review with noise. Apply these filters:
+Report issues you would defend in review; skip the rest.
 
-- **Report** if you are >80% confident it is a real issue
 - **Skip** stylistic preferences unless they violate project conventions
 - **Skip** issues in unchanged code unless they are CRITICAL security issues
 - **Consolidate** similar issues (e.g., "5 functions missing error handling" not 5 separate findings)
@@ -68,58 +67,17 @@ These MUST be flagged — they can cause real damage:
 - **Insecure dependencies** — Known vulnerable packages
 - **Exposed secrets in logs** — Logging sensitive data (tokens, passwords, PII)
 
-```typescript
-// BAD: SQL injection via string concatenation
-const query = `SELECT * FROM users WHERE id = ${userId}`;
-
-// GOOD: Parameterized query
-const query = `SELECT * FROM users WHERE id = $1`;
-const result = await db.query(query, [userId]);
-```
-
-```typescript
-// BAD: Rendering raw user HTML without sanitization
-// Always sanitize user content with DOMPurify.sanitize() or equivalent
-
-// GOOD: Use text content or sanitize
-<div>{userComment}</div>
-```
-
 ### Code Quality (HIGH)
 
 - **Large functions** (>50 lines) — Split into smaller, focused functions
 - **Large files** (>800 lines) — Extract modules by responsibility
 - **Deep nesting** (>4 levels) — Use early returns, extract helpers
 - **Missing error handling** — Unhandled promise rejections, empty catch blocks
+- **Bounded degraded modes** — When a diff adds a catch, fallback, retry, or skip-and-continue path, verify the degraded state is observable and has an explicit threshold that escalates or aborts. Do not require every layer to log; require the failure to surface once at the boundary that owns the operational context.
 - **Mutation patterns** — Prefer immutable operations (spread, map, filter)
 - **console.log statements** — Remove debug logging before merge
 - **Missing tests** — New code paths without test coverage
 - **Dead code** — Commented-out code, unused imports, unreachable branches
-
-```typescript
-// BAD: Deep nesting + mutation
-function processUsers(users) {
-  if (users) {
-    for (const user of users) {
-      if (user.active) {
-        if (user.email) {
-          user.verified = true;  // mutation!
-          results.push(user);
-        }
-      }
-    }
-  }
-  return results;
-}
-
-// GOOD: Early returns + immutability + flat
-function processUsers(users) {
-  if (!users) return [];
-  return users
-    .filter(user => user.active && user.email)
-    .map(user => ({ ...user, verified: true }));
-}
-```
 
 ### Design & Maintainability (HIGH)
 
@@ -131,6 +89,8 @@ Cross-cutting design decay — language-agnostic. These complement the size/synt
 - **Knowledge duplication** — the same *decision* (not just code lines) expressed in multiple places; one domain concept named 3+ ways (`user` / `account` / `member` / `customer`); parallel class hierarchies that must change in lockstep.
 - **Accidental complexity** — abstractions built "for future use" with a single current consumer (Speculative Generality / YAGNI); classes that only delegate without adding behavior (Middle Man); a rewrite materially more elaborate than the problem it solves (Second-System Effect).
 - **Cognitive overload (beyond size/nesting above)** — parameter lists >4; a boolean flag parameter that switches the function between two behaviors (= two responsibilities); domain concepts passed as bare primitives (`String email`, `int orderId`) instead of purpose-built value types.
+- **Event state ordering (conditional)** — when the diff touches an event, webhook, queue/job handler, async callback, or state transition, identify every state/entity it reads but does not create itself. Trace where that state is created and require a code-level ordering guarantee such as an existence check, idempotent upsert, queue dependency, transaction, or lock. Handler registration order and timing assumptions are not guarantees; flag only when a reachable execution can observe missing or stale state.
+- **Unit and representation drift (conditional)** — when the diff touches money, quantity, duration, percentage, date/time, or timezone values, trace each value from creation through conversions, storage, API boundaries, and downstream reads. Verify that its meaning stays explicit and consistent: cents vs dollars, per-item vs per-pack, seconds vs milliseconds, 0–1 fraction vs 0–100 percent, and UTC vs local time. Flag only a concrete mismatch or an ambiguous boundary that can change behavior.
 
 **What NOT to flag here** (false-positive guards): a composition root wiring concrete dependencies is not a DIP violation; DTOs / persistence records / API payload models are allowed to be data-only (not anemic); coordinated edits inside one bounded context are not shotgun surgery; a switch over a closed external enum or wire format is not missing polymorphism; repetition across separate bounded contexts is not automatically duplicate knowledge.
 
@@ -147,26 +107,6 @@ When reviewing React/Next.js code, also check:
 - **Missing loading/error states** — Data fetching without fallback UI
 - **Stale closures** — Event handlers capturing stale state values
 
-```tsx
-// BAD: Missing dependency, stale closure
-useEffect(() => {
-  fetchData(userId);
-}, []); // userId missing from deps
-
-// GOOD: Complete dependencies
-useEffect(() => {
-  fetchData(userId);
-}, [userId]);
-```
-
-```tsx
-// BAD: Using index as key with reorderable list
-{items.map((item, i) => <ListItem key={i} item={item} />)}
-
-// GOOD: Stable unique key
-{items.map(item => <ListItem key={item.id} item={item} />)}
-```
-
 ### Node.js/Backend Patterns (HIGH)
 
 When reviewing backend code:
@@ -178,22 +118,6 @@ When reviewing backend code:
 - **Missing timeouts** — External HTTP calls without timeout configuration
 - **Error message leakage** — Sending internal error details to clients
 - **Missing CORS configuration** — APIs accessible from unintended origins
-
-```typescript
-// BAD: N+1 query pattern
-const users = await db.query('SELECT * FROM users');
-for (const user of users) {
-  user.posts = await db.query('SELECT * FROM posts WHERE user_id = $1', [user.id]);
-}
-
-// GOOD: Single query with JOIN or batch
-const usersWithPosts = await db.query(`
-  SELECT u.*, json_agg(p.*) as posts
-  FROM users u
-  LEFT JOIN posts p ON p.user_id = u.id
-  GROUP BY u.id
-`);
-```
 
 ### Performance (MEDIUM)
 
@@ -264,7 +188,7 @@ When available, also check project-specific conventions from `CLAUDE.md` or proj
 
 Adapt your review to the project's established patterns. When in doubt, match what the rest of the codebase does.
 
-## v1.8 AI-Generated Code Review Addendum
+## Reviewing AI-generated changes
 
 When reviewing AI-generated changes, prioritize:
 

@@ -12,7 +12,6 @@ When invoked:
 1. Run `git diff -- '*.py'` to see recent Python file changes
 2. Run static analysis tools if available (ruff, mypy, pylint, black --check)
 3. Focus on modified `.py` files
-4. Begin review immediately
 
 ## Review Priorities
 
@@ -89,10 +88,6 @@ Fix: What to change
 - **Django**: `select_related`/`prefetch_related` for N+1, `atomic()` for multi-step, migrations
 - **FastAPI**: CORS config, Pydantic validation, response models, no blocking in async
 - **Flask**: Proper error handlers, CSRF protection
-
-## Reference
-
-If your setup ships a `python-patterns` skill, consult it for detailed patterns and code samples; it is not part of this repo — when absent, rely on the rules in this file.
 
 ---
 

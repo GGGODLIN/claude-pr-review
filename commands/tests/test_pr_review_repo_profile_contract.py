@@ -20,8 +20,9 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
     end = self.command.index(end_marker, start)
     return self.command[start:end]
 
-  def test_zsh_poll_word_splits_rollout_paths(self):
-    self.assertIn("${=ROLLOUTS}", self.command)
+  def test_poll_word_splits_rollout_paths_in_bash_and_zsh(self):
+    self.assertIn('printf \'%s\\n\' "$ROLLOUTS" | xargs ~/.claude/scripts/poll-liveness.sh poll', self.command)
+    self.assertNotIn("${=ROLLOUTS}", self.command)
     self.assertNotRegex(self.command, r"--deadline \d+ \$ROLLOUTS\b")
     self.assertNotIn("ls -S $ROLLOUTS", self.command)
 
@@ -124,6 +125,14 @@ class PrReviewRepoProfileContractTest(unittest.TestCase):
   def test_private_files_live_under_home_pr_review_dir(self):
     self.assertIn("~/.claude/pr-review/calibration/<author-slug>.md", self.command)
     self.assertIn("~/.claude/pr-review/friction.md", self.command)
+
+  def test_command_carries_no_private_identifiers(self):
+    self.assertNotRegex(self.command, r"/Users/[A-Za-z0-9_.-]+/")
+    self.assertNotRegex(self.command, r"\b[Pp][Rr] ?#\d+")
+    self.assertNotRegex(self.command, r"\b20\d{2}-\d{2}-\d{2}\b")
+    self.assertNotRegex(self.command, r"\[\[[A-Za-z0-9_-]+\]\]")
+    self.assertNotRegex(self.command, r"/(?:Users|home)/[A-Za-z0-9_.-]+")
+    self.assertNotRegex(self.command, r"\bDesktop/\w+")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sem-pr-blast-radius.sh <repo> <base-ref>
 # 對 PR diff（base..HEAD）中 modified 的既有 entity 算彙總 blast radius，給 /pr-review
-# Step 2.9 注入 Opus reviewer context。graceful: 無 sem / 非 git / parse 失敗 → 靜默 exit 0。
+# Step 2.9 注入 CC reviewer context。graceful: 無 sem / 非 git / parse 失敗 → 靜默 exit 0。
 # 補強而非依賴。對應工具: sem (Ataraxy-Labs/sem)。
 set -euo pipefail
 export SEM_CACHE_DIR="${SEM_CACHE_DIR:-$HOME/.cache/sem}"

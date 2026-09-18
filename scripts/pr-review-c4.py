@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# Its dispatch wiring is contract-tested by commands/tests/test_pr_review_c4_dispatch_contract.py.
-# No behavioral test suite ships with this repo — see README "Caution" before changing reducer logic.
+# This file is covered by scripts/test_pr_review_c4.py. Run that file after changes.
 
 import argparse
 import hashlib
@@ -42,6 +41,12 @@ FINDING_CLASSIFICATIONS = {
   "missing_in_code",
   "code_weaker_than_spec",
   "undocumented_behavior",
+}
+GROUP_SUGGESTION_BY_SEVERITY = {
+  "CRITICAL": "Must Fix",
+  "HIGH": "Must Fix",
+  "MEDIUM": "Should Fix",
+  "LOW": "參考用",
 }
 CHANGE_DELTA_SPEC_PATTERN = r"openspec/changes/(?!archive/)[^/]+/specs/.+\.md"
 
@@ -117,6 +122,7 @@ PACKET_CLAUSE_SCHEMA = strict_object(
     **AUTHORITY_CANDIDATE_SCHEMA["properties"],
     "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "authority_alias_path": {"type": "string", "minLength": 1},
+    "target_identity": {"type": "string", "minLength": 1},
   },
   [*AUTHORITY_CANDIDATE_SCHEMA["required"], "source_hash"],
 )
@@ -127,6 +133,7 @@ HEAD_BINDING_SCHEMA = strict_object(
     **ANCHOR_SCHEMA["properties"],
     "quote": {"type": "string", "minLength": 1},
     "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "target_identity": {"type": "string", "minLength": 1},
   },
   [
     "binding_id",
@@ -160,8 +167,16 @@ CHANGED_FILE_SCHEMA = strict_object(
   {
     "path": {"type": "string", "minLength": 1},
     "provenance": {"enum": ["authored", "inherited"]},
+    "target_identity": {"type": "string", "minLength": 1},
   },
   ["path", "provenance"],
+)
+SPEC_FILE_SCHEMA = strict_object(
+  {
+    "path": {"type": "string", "minLength": 1},
+    "target_identity": {"type": "string", "minLength": 1},
+  },
+  ["path"],
 )
 CLAUSE_TRACE_SCHEMA = strict_object(
   {
@@ -233,10 +248,7 @@ PACKET_SCHEMA = strict_object(
     "spec_files": {
       "type": "array",
       "minItems": 1,
-      "items": strict_object(
-        {"path": {"type": "string", "minLength": 1}},
-        ["path"],
-      ),
+      "items": SPEC_FILE_SCHEMA,
     },
     "changed_files": {
       "type": "array",
@@ -488,8 +500,24 @@ BINDING_CONTEXT_SCHEMA = strict_object(
     "review_root": {"type": "string", "minLength": 1},
     "authored_diff_base": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
     "review_head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "targets": {"type": "object"},
   },
   ["review_root", "authored_diff_base", "review_head"],
+)
+BINDING_TARGET_SCHEMA = strict_object(
+  {
+    "review_root": {"type": "string", "minLength": 1},
+    "authored_diff_base": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "review_head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+  },
+  ["review_root", "authored_diff_base", "review_head"],
+)
+BINDING_TARGETS_VALIDATOR = Draft202012Validator(
+  {
+    "type": "object",
+    "minProperties": 1,
+    "additionalProperties": BINDING_TARGET_SCHEMA,
+  }
 )
 RESOLVE_CLI_SCHEMA = strict_object(
   {
@@ -922,6 +950,18 @@ def packet_valid(packet):
       return False
     if item["side"] == "base" and item["path"] != item["old_path"]:
       return False
+  multi_target = packet_is_multi_target(packet)
+  if multi_target:
+    declared = packet_targets(packet)
+    for item in packet["clauses"]:
+      if target_for_item(item) not in declared:
+        return False
+    for item in packet["spec_files"] + packet["changed_files"]:
+      if target_for_item(item) not in declared:
+        return False
+    for item in packet["evidence_bindings"]:
+      if target_for_item(item) not in declared:
+        return False
   authored_paths = {
     item["path"]
     for item in packet["changed_files"]
@@ -1031,6 +1071,48 @@ def finding_code_binding_valid(
   return False
 
 
+def finding_code_targets(finding, binding_index, authored_binding_ids, authored_hunk_ranges):
+  targets = set()
+  for trace in finding["trace_anchors"]:
+    binding_id = trace["binding_id"]
+    binding = binding_index.get(binding_id)
+    if (
+      binding is None
+      or binding_id not in authored_binding_ids
+      or trace["path"] != finding["file"]
+    ):
+      continue
+    location = quote_location(trace["quote"], finding["anchor"])
+    if location is None:
+      continue
+    line_start = trace["line_start"] + location[0] - 1
+    line_end = trace["line_start"] + location[1] - 1
+    if (
+      (finding["line_start"], finding["line_end"]) == (line_start, line_end)
+      and ranges_overlap(line_start, line_end, authored_hunk_ranges.get(binding_id, []))
+    ):
+      identity = target_for_item(binding)
+      if identity is not None:
+        targets.add(identity)
+  return targets
+
+
+def group_finding_for(finding, target_identity, spec_target_identity):
+  return {
+    **finding,
+    "target_identity": target_identity,
+    "spec_target_identity": spec_target_identity,
+    "line": finding["line_start"],
+    "root_cause": finding["problem"],
+    "comment": finding["impact"],
+    "source": "spec-compliance",
+    "suggestion": GROUP_SUGGESTION_BY_SEVERITY.get(finding["severity"], "參考用"),
+    "action": "ask-user",
+    "action_reason": "需人工判斷",
+    "reducer_validated": True,
+  }
+
+
 def git_tree_entry(review_root, tree, path):
   listed = git_output(review_root, ["ls-tree", "-z", tree, "--", path])
   if listed is None:
@@ -1087,9 +1169,10 @@ def base_binding_tree_matches(review_root, authored_diff_base, binding):
 
 
 def packet_authority_valid(binding_context, packet):
-  review_root = binding_context["review_root"]
-  review_head = binding_context["review_head"]
   for clause in packet["clauses"]:
+    clause_context = context_for_target(binding_context, target_for_item(clause))
+    review_root = clause_context["review_root"]
+    review_head = clause_context["review_head"]
     spec_path = clause["spec_path"]
     if not spec_path.startswith("openspec/specs/") and not change_delta_spec_path(spec_path):
       return False
@@ -1142,14 +1225,15 @@ def git_blob_text(review_root, binding):
 
 
 def binding_failure_reason(binding_context, binding):
-  review_root = binding_context["review_root"]
+  item_context = context_for_target(binding_context, target_for_item(binding))
+  review_root = item_context["review_root"]
   if binding["side"] == "head":
-    entry = git_tree_entry(review_root, binding_context["review_head"], binding["path"])
+    entry = git_tree_entry(review_root, item_context["review_head"], binding["path"])
     text = entry["text"] if entry is not None else None
   else:
     if not base_binding_tree_matches(
       review_root,
-      binding_context["authored_diff_base"],
+      item_context["authored_diff_base"],
       binding,
     ):
       return "C4_TRACE_PROVENANCE_MISMATCH"
@@ -1213,52 +1297,111 @@ def diff_line_ranges(review_root, base, head, path, side):
 
 
 def authoritative_hunk_ranges(binding_context, packet):
-  review_root = Path(binding_context["review_root"]).expanduser().resolve()
-  top_level = git_output(review_root, ["rev-parse", "--show-toplevel"])
-  head = git_output(review_root, ["rev-parse", "HEAD"])
-  base_tree = git_output(
-    review_root,
-    ["rev-parse", "--verify", f"{binding_context['authored_diff_base']}^{{tree}}"],
-  )
-  head_tree = git_output(
-    review_root,
-    ["rev-parse", "--verify", f"{binding_context['review_head']}^{{tree}}"],
-  )
-  try:
-    top_level_path = Path(top_level.decode("utf-8").strip()).resolve()
-    observed_head = head.decode("ascii").strip()
-  except (AttributeError, UnicodeDecodeError):
-    return None
-  if (
-    top_level_path != review_root
-    or observed_head != binding_context["review_head"]
-    or base_tree is None
-    or head_tree is None
-  ):
-    return None
   binding_index = unique_index(packet["evidence_bindings"], "binding_id")
   ranges = {}
   cache = {}
+  verified = {}
   for binding_id in packet["trace_context"]["authored_diff_binding_ids"]:
     binding = binding_index[binding_id]
-    path = binding["path"] if binding["side"] == "head" else binding["old_path"]
-    key = (path, binding["side"])
-    if key not in cache:
-      cache[key] = diff_line_ranges(
+    item_context = context_for_target(binding_context, target_for_item(binding))
+    cache_key = (
+      item_context["review_root"],
+      item_context["authored_diff_base"],
+      item_context["review_head"],
+      binding["path"],
+      binding["side"],
+    )
+    root_verified = verified.get(item_context["review_root"])
+    if root_verified is None:
+      review_root = Path(item_context["review_root"]).expanduser().resolve()
+      top_level = git_output(review_root, ["rev-parse", "--show-toplevel"])
+      head = git_output(review_root, ["rev-parse", "HEAD"])
+      base_tree = git_output(
         review_root,
-        binding_context["authored_diff_base"],
-        binding_context["review_head"],
+        ["rev-parse", "--verify", f"{item_context['authored_diff_base']}^{{tree}}"],
+      )
+      head_tree = git_output(
+        review_root,
+        ["rev-parse", "--verify", f"{item_context['review_head']}^{{tree}}"],
+      )
+      try:
+        top_level_path = Path(top_level.decode("utf-8").strip()).resolve()
+        observed_head = head.decode("ascii").strip()
+      except (AttributeError, UnicodeDecodeError):
+        return None
+      root_verified = (
+        top_level_path == review_root
+        and observed_head == item_context["review_head"]
+        and base_tree is not None
+        and head_tree is not None
+      )
+      verified[item_context["review_root"]] = root_verified
+    if not root_verified:
+      return None
+    path = binding["path"] if binding["side"] == "head" else binding["old_path"]
+    if cache_key not in cache:
+      cache[cache_key] = diff_line_ranges(
+        Path(item_context["review_root"]).expanduser().resolve(),
+        item_context["authored_diff_base"],
+        item_context["review_head"],
         path,
         binding["side"],
       )
-    if cache[key] is None:
+    if cache[cache_key] is None:
       return None
     ranges[binding_id] = [
       item
-      for item in cache[key]
+      for item in cache[cache_key]
       if ranges_overlap(binding["line_start"], binding["line_end"], [item])
     ]
   return ranges
+
+
+def packet_targets(packet):
+  identities = set()
+  for group in ("clauses", "spec_files", "changed_files"):
+    identities.update(item.get("target_identity") for item in packet[group])
+  identities.update(item.get("target_identity") for item in packet["evidence_bindings"])
+  identities.discard(None)
+  return identities
+
+
+def packet_is_multi_target(packet):
+  return bool(packet_targets(packet))
+
+
+def target_context(binding_context, packet):
+  context = {key: binding_context[key] for key in ("review_root", "authored_diff_base", "review_head")}
+  if not packet_is_multi_target(packet):
+    if "targets" in binding_context:
+      return None
+    return context
+  targets = binding_context.get("targets")
+  if not isinstance(targets, dict) or not BINDING_TARGETS_VALIDATOR.is_valid(targets):
+    return None
+  identities = packet_targets(packet)
+  if not identities or not identities.issubset(targets):
+    return None
+  return {**context, "targets": targets}
+
+
+def target_for_item(item):
+  identity = item.get("target_identity")
+  return identity if isinstance(identity, str) else None
+
+
+def context_for_target(binding_context, identity):
+  if identity is None:
+    return {
+      key: binding_context[key]
+      for key in ("review_root", "authored_diff_base", "review_head")
+    }
+  entry = binding_context["targets"][identity]
+  return {
+    "review_root": entry["review_root"],
+    "authored_diff_base": entry["authored_diff_base"],
+    "review_head": entry["review_head"],
+  }
 
 
 def same_flow_valid(finding, clause):
@@ -1304,9 +1447,12 @@ def validate_output(packet, raw_output, runtime_input=None, binding_context=None
     return failure_result(raw_output, "C4_RUNTIME_OUTPUT_MISMATCH", parsed)
   if not schema_valid(BINDING_CONTEXT_VALIDATOR, binding_context):
     return failure_result(raw_output, "C4_BINDING_CONTEXT_INVALID", parsed)
-  if not packet_authority_valid(binding_context, packet):
+  resolved_context = target_context(binding_context, packet)
+  if resolved_context is None:
+    return failure_result(raw_output, "C4_BINDING_TARGET_INVALID", parsed)
+  if not packet_authority_valid(resolved_context, packet):
     return failure_result(raw_output, "C4_AUTHORITY_BINDING_INVALID", parsed)
-  authored_hunk_ranges = authoritative_hunk_ranges(binding_context, packet)
+  authored_hunk_ranges = authoritative_hunk_ranges(resolved_context, packet)
   if authored_hunk_ranges is None:
     return failure_result(raw_output, "C4_HUNK_CONTEXT_INVALID", parsed)
   if not schema_valid(REVIEWER_OUTPUT_VALIDATOR, parsed):
@@ -1359,6 +1505,8 @@ def validate_output(packet, raw_output, runtime_input=None, binding_context=None
   }
   authored_binding_ids = set(packet["trace_context"]["authored_diff_binding_ids"])
   clause_trace_index = unique_index(packet["trace_context"]["clause_traces"], "clause_id")
+  multi_target = packet_is_multi_target(packet)
+  finding_target_index = {}
   for finding_id, item in finding_index.items():
     source = accounting_by_finding[finding_id]
     clause_id = source["clause_id"]
@@ -1387,16 +1535,27 @@ def validate_output(packet, raw_output, runtime_input=None, binding_context=None
       authored_hunk_ranges,
     ):
       return failure_result(raw_output, "C4_CODE_BINDING_MISMATCH", parsed)
+    if multi_target:
+      code_targets = finding_code_targets(
+        item,
+        binding_index,
+        authored_binding_ids,
+        authored_hunk_ranges,
+      )
+      if len(code_targets) != 1:
+        return failure_result(raw_output, "C4_CODE_TARGET_AMBIGUOUS", parsed)
+      finding_target_index[finding_id] = next(iter(code_targets))
   if not validate_summary(parsed):
     return failure_result(raw_output, "C4_SUMMARY_MISMATCH", parsed)
   observed_failures = binding_failures(
-    binding_context,
+    resolved_context,
     packet,
     authored_hunk_ranges,
   )
   raw_hash = raw_output_hash(raw_output)
   invalidated = []
   admitted = []
+  group_findings = []
   for item in parsed["findings"]:
     failed_ids = [
       trace["binding_id"]
@@ -1410,7 +1569,15 @@ def validate_output(packet, raw_output, runtime_input=None, binding_context=None
         "raw_output_hash": raw_hash,
       })
       continue
-    admitted.append({**item, "clause_id": accounting_by_finding[item["id"]]["clause_id"]})
+    clause_id = accounting_by_finding[item["id"]]["clause_id"]
+    admitted_item = {**item, "clause_id": clause_id}
+    admitted.append(admitted_item)
+    if multi_target:
+      group_findings.append(group_finding_for(
+        admitted_item,
+        finding_target_index[item["id"]],
+        target_for_item(clause_index[clause_id]),
+      ))
   observation_candidates = [
     item
     for item in parsed["contract_accounting"]
@@ -1460,6 +1627,7 @@ def validate_output(packet, raw_output, runtime_input=None, binding_context=None
     "raw_output_hash": raw_hash,
     "candidate_count": len(parsed["findings"]),
     "admitted_findings": admitted,
+    "group_findings": group_findings,
     "observations": observations,
     "invalidated": invalidated,
     "human_projection": {

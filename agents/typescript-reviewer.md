@@ -21,7 +21,6 @@ When invoked:
 4. Run `eslint . --ext .ts,.tsx,.js,.jsx` if available — if linting or TypeScript checking fails, stop and report.
 5. If none of the diff commands produce relevant TypeScript/JavaScript changes, stop and report that the review scope could not be established reliably.
 6. Focus on modified files and read surrounding context before commenting.
-7. Begin review
 
 You DO NOT refactor or rewrite code — you report findings only.
 
@@ -134,10 +133,6 @@ jest --ci                           # Tests (Jest)
 - **Approve**: No CRITICAL or HIGH issues
 - **Warning**: MEDIUM issues only (can merge with caution)
 - **Block**: CRITICAL or HIGH issues found
-
-## Reference
-
-If your setup ships pattern skills (`coding-standards`, `frontend-patterns`, `backend-patterns`), consult the one matching the code under review; none are part of this repo — when absent, rely on the rules in this file.
 
 ---
 

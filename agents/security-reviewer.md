@@ -112,14 +112,6 @@ Flag these patterns immediately:
 | No rate limiting | HIGH | Add `express-rate-limit` |
 | Logging passwords/secrets | MEDIUM | Sanitize log output |
 
-## Key Principles
-
-1. **Defense in Depth** — Multiple layers of security
-2. **Least Privilege** — Minimum permissions required
-3. **Fail Securely** — Errors should not expose data
-4. **Don't Trust Input** — Validate and sanitize everything
-5. **Update Regularly** — Keep dependencies current
-
 ## Common False Positives
 
 - Environment variables in `.env.example` (not actual secrets)
@@ -223,28 +215,7 @@ Confidence 由你實際拿到的最強證據決定，**不由 bug class 聽起�
 
 **Confidence 三級**：路徑精確 + 前提明確 + 無未解反證 = 高；路徑合理但呼叫鏈、config、版本或部署證據不全 = 中；靜態支撐薄弱或缺 repo 脈絡 = 低。
 
-## Emergency Response
-
-If you find a CRITICAL vulnerability:
-1. Document with detailed report
-2. Alert project owner immediately
-3. Provide secure code example
-4. Verify remediation works
-5. Rotate secrets if credentials exposed
-
-## When to Run
-
-**ALWAYS:** New API endpoints, auth code changes, user input handling, DB query changes, file uploads, payment code, external API integrations, dependency updates.
-
-**IMMEDIATELY:** Production incidents, dependency CVEs, user security reports, before major releases.
-
-## Success Metrics
-
-- No CRITICAL issues found
-- All HIGH issues addressed
-- No secrets in code
-- Dependencies up to date
-- Security checklist complete
+CRITICAL finding: report it immediately rather than finishing the sweep first, and name the rotation step the user must perform.
 
 ## Finding 欄位契約（每條要進報告的 finding 都要帶，2026-08-01, from openai/codex-security finding-detail-fields + scan-contract + triage-result-contract + findings.schema.json）
 
@@ -262,7 +233,6 @@ If you find a CRITICAL vulnerability:
 
 ---
 
-**Remember**: Security is not optional. One vulnerability can cost users real financial losses. Be thorough, be paranoid, be proactive.
 
 ## Vendor-platform claims must carry a lookup, not a recollection
 

@@ -12,14 +12,54 @@ from pathlib import Path
 from markdown_it import MarkdownIt
 
 
+CLAUDE_ROOT = Path(__file__).resolve().parent.parent
+REPORT_ROOT = (CLAUDE_ROOT / "pr-review-reports").resolve()
+REPORT_PATTERNS = (
+  ("main", re.compile(r"pr-(\d+)-review\.md")),
+  ("audit", re.compile(r"pr-(\d+)-review\.audit\.md")),
+  ("draft", re.compile(r"pr-(\d+)-review\.audit\.draft\.md")),
+)
+GROUP_PATTERNS = (
+  ("main", re.compile(r"set-([0-9a-f]{12})-review\.md")),
+  ("audit", re.compile(r"set-([0-9a-f]{12})-review\.audit\.md")),
+  ("draft", re.compile(r"set-([0-9a-f]{12})-review\.audit\.draft\.md")),
+)
+GROUP_ROOT_NAME = "sets"
+GROUP_SCHEMA_LINE = "**Report projection schema**: 3"
 UID_PATTERN = re.compile(r"(?<![0-9a-f])([0-9a-f]{20})(?![0-9a-f])")
+SCHEMA_LINES = {
+  "**Report projection schema**: 1": 1,
+  "**Report projection schema**: 2": 2,
+  GROUP_SCHEMA_LINE: 3,
+}
+SET_IDENTITY_PATTERN = re.compile(
+  r"\*\*Review set identity\*\*: (sha256:[0-9a-f]{64})"
+)
+TARGET_VERSIONS_PATTERN = re.compile(
+  r"\*\*Target versions\*\*: (.+)"
+)
+VERSION_ENTRY_PATTERN = re.compile(
+  r"(\S+)=head:([0-9a-f]{40}|none)\|base:([0-9a-f]{40}|none)\|state:(current|drifted|unavailable)"
+)
+PRIOR_REVIEW_TITLE = "上一輪 findings 對帳"
 INLINE_TITLES = {
   "Inline Comments per Finding",
   "Inline Comments per Finding（直接複製貼到 PR review）",
   "Inline Comments per Finding（複製貼到 PR）",
 }
+SET_LOCATIONS_TITLE = "跨目標位置"
+GROUP_KEEP_TITLES = (
+  "發現總覽",
+  SET_LOCATIONS_TITLE,
+  PRIOR_REVIEW_TITLE,
+  *INLINE_TITLES,
+)
+LOCATION_HEADERS = ("group_id", "finding_uid", "target_identity", "file", "line", "source")
+LINE_SENTINEL = "需人工確認（anchor 未在綁定來源中比中或證據 binding 失效）"
+LOCATION_UID_HEADING = "### finding_uid 索引"
 KEEP_TITLES = (
   "發現總覽",
+  PRIOR_REVIEW_TITLE,
   "React-doctor 機械掃描",
   *INLINE_TITLES,
   "本輪限制",
@@ -31,6 +71,7 @@ KEEP_TITLES = (
   "Review continuity（產報告前重驗）",
 )
 STATE_PREFIXES = (
+  "**Prior review continuity**:",
   "**審查工具**:",
   "**Reviewer models**:",
   "**覆蓋 (ENH-A)**:",
@@ -413,7 +454,7 @@ def extract_uid_map(text, strict=False):
 
 def extract_finding_uids(text):
   order, _, _ = extract_finding_actions(text)
-  strict = extract_header_lines(text).count("**Report projection schema**: 1") == 1
+  strict = projection_schema_version(text) is not None
   uid_map = extract_uid_map(text, strict=strict)
   return [uid_map[ordinal][0] for ordinal in order if len(uid_map.get(ordinal, [])) == 1]
 
@@ -659,12 +700,11 @@ def extract_comment_payload_map(text):
 
 
 def line_value_is_valid(line):
-  sentinel = "需人工確認（anchor 未在綁定來源中比中或證據 binding 失效）"
   match = re.fullmatch(r"\*\*Line\*\*: (.+)", line)
   if not match:
     return False
   value = match.group(1)
-  if value == sentinel:
+  if value == LINE_SENTINEL:
     return True
   numeric = re.fullmatch(r"(\d+)(?:-(\d+))?", value)
   if not numeric:
@@ -757,13 +797,207 @@ def extract_header_lines(text):
   return [line.rstrip("\r\n") for _, line in outside_fence_lines(preamble)]
 
 
-def preamble_structure_is_valid(text):
+def projection_schema_version(text):
+  header_lines = extract_header_lines(text)
+  versions = [
+    version
+    for line, version in SCHEMA_LINES.items()
+    for _ in range(header_lines.count(line))
+  ]
+  return versions[0] if len(versions) == 1 else None
+
+
+def prior_review_continuity_is_valid(text):
+  return continuity_state_is_valid(text, PRIOR_REVIEW_TITLE)
+
+
+def extract_location_column(text, column):
+  _, sections = split_h2_sections(text)
+  matches = [section for title, section in sections if title == SET_LOCATIONS_TITLE]
+  if len(matches) != 1:
+    return []
+  headers = list(LOCATION_HEADERS)
+  if column not in headers:
+    return []
+  lines = [line for _, line in outside_fence_lines(matches[0])]
+  header_indexes = [index for index, line in enumerate(lines) if table_cells(line) == headers]
+  if len(header_indexes) != 1:
+    return []
+  result = []
+  index = header_indexes[0]
+  if index + 1 >= len(lines) or not is_table_separator(table_cells(lines[index + 1])):
+    return []
+  for line in lines[index + 2:]:
+    cells = table_cells(line)
+    if not cells:
+      break
+    if len(cells) != len(headers) or is_table_separator(cells):
+      return []
+    result.append(cells[headers.index(column)])
+  return result
+
+
+def extract_location_uids(text):
+  return extract_location_column(text, "finding_uid")
+
+
+def extract_location_group_ids(text):
+  return extract_location_column(text, "group_id")
+
+
+def set_locations_is_valid(text):
+  _, sections = split_h2_sections(text)
+  matches = [section for title, section in sections if title == SET_LOCATIONS_TITLE]
+  if len(matches) != 1:
+    return False
+  headers = list(LOCATION_HEADERS)
+  lines = [line for _, line in outside_fence_lines(matches[0])]
+  header_indexes = [index for index, line in enumerate(lines) if table_cells(line) == headers]
+  if len(header_indexes) != 1:
+    return False
+  index = header_indexes[0]
+  if index + 1 >= len(lines) or not is_table_separator(table_cells(lines[index + 1])):
+    return False
+  rows = []
+  for line in lines[index + 2:]:
+    cells = table_cells(line)
+    if not cells:
+      break
+    if len(cells) != len(headers) or is_table_separator(cells):
+      return False
+    rows.append(cells)
+  if not rows:
+    return False
+  columns = {name: position for position, name in enumerate(headers)}
+  group_ids = [cells[columns["group_id"]] for cells in rows]
+  uids = [cells[columns["finding_uid"]] for cells in rows]
+  if not all(UID_PATTERN.fullmatch(group_id) for group_id in group_ids):
+    return False
+  if len(uids) != len(set(uids)) or not all(UID_PATTERN.fullmatch(uid) for uid in uids):
+    return False
+  if not all(
+    cells[columns["target_identity"]] and cells[columns["file"]] and cells[columns["source"]]
+    for cells in rows
+  ):
+    return False
+  return all(
+    cells[columns["line"]] == LINE_SENTINEL or re.fullmatch(r"[1-9]\d*", cells[columns["line"]])
+    for cells in rows
+  )
+
+
+def continuity_table_matches(section, expected):
+  lines = [line for _, line in outside_fence_lines(section)]
+  headers = ["前輪 finding_uid", "問題", "狀態", "本輪證據"]
+  header_indexes = [index for index, line in enumerate(lines) if table_cells(line) == headers]
+  if len(header_indexes) != 1:
+    return False
+  header_index = header_indexes[0]
+  if header_index + 1 >= len(lines) or not is_table_separator(table_cells(lines[header_index + 1])):
+    return False
+  rows = []
+  for line in lines[header_index + 2:]:
+    cells = table_cells(line)
+    if not cells:
+      break
+    if len(cells) != len(headers) or is_table_separator(cells):
+      return False
+    rows.append(cells)
+  uids = [cells[0] for cells in rows]
+  statuses = [cells[2] for cells in rows]
+  actual = {status: statuses.count(status) for status in expected}
+  return (
+    len(rows) == sum(expected.values())
+    and len(uids) == len(set(uids))
+    and all(UID_PATTERN.fullmatch(uid) for uid in uids)
+    and all(cells[1] and cells[3] for cells in rows)
+    and set(statuses) <= set(expected)
+    and actual == expected
+  )
+
+
+def continuity_state_is_valid(text, title):
+  state_lines = [
+    line
+    for line in extract_header_lines(text)
+    if line.startswith("**Prior review continuity**:")
+  ]
+  sections = [
+    section
+    for section_title, section in split_h2_sections(text)[1]
+    if section_title == title
+  ]
+  if len(state_lines) != 1 or len(sections) != 1:
+    return False
+  state = state_lines[0]
+  section = sections[0]
+  if state == "**Prior review continuity**: N-A (no prior audit)":
+    return "N-A — no prior audit" in section
+  skipped = re.fullmatch(r"\*\*Prior review continuity\*\*: SKIPPED \((.+)\)", state)
+  if skipped:
+    return f"SKIPPED — {skipped.group(1)}" in section
+  checked = re.fullmatch(
+    r"\*\*Prior review continuity\*\*: CHECKED \(fixed (\d+) / still-open (\d+) / stale (\d+)\)",
+    state,
+  )
+  if not checked:
+    return False
+  expected = {
+    "FIXED": int(checked.group(1)),
+    "STILL_OPEN": int(checked.group(2)),
+    "STALE": int(checked.group(3)),
+  }
+  if sum(expected.values()) == 0:
+    return "CHECKED — 0 actionable findings" in section
+  return continuity_table_matches(section, expected)
+
+
+def group_source_checks(text):
+  identities = group_identity_lines(text)
+  header_lines = extract_header_lines(text)
+  required_state_counts = (
+    sum(line.startswith("**Review set identity**:") for line in header_lines),
+    sum(line.startswith("**Target versions**:") for line in header_lines),
+    sum(line.startswith("**Prior review continuity**:") for line in header_lines),
+  )
+  targets = [entry.split("=", 1)[0] for entry in identities[1]] if identities else []
+  targets_line = [
+    line[len("**Review set targets**: "):]
+    for line in header_lines if line.startswith("**Review set targets**: ")
+  ]
+  declared = sorted(part.strip() for part in targets_line[0].split(" · ")) if len(targets_line) == 1 else []
+  canonical_identity = None
+  if declared:
+    joined = "\n".join(declared)
+    canonical_identity = "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()
+  return {
+    "review-set-identity": identities is not None and bool(targets),
+    "target-version-coverage": bool(targets) and len(targets) == len(set(targets)),
+    "targets-line-unique": len(targets_line) == 1,
+    "targets-match-versions": bool(declared) and sorted(targets) == declared,
+    "identity-derived": bool(canonical_identity) and identities is not None
+    and identities[0] == canonical_identity,
+    "set-locations": set_locations_is_valid(text),
+    "required-state": required_state_counts == (1, 1, 1),
+    "prior-review-continuity": continuity_state_is_valid(text, PRIOR_REVIEW_TITLE),
+  }
+
+
+def preamble_structure_is_valid(text, group=False, expected_stable_id=None):
   preamble, _ = split_h2_sections(text)
   records, unclosed_fence = scan_markdown_lines(preamble)
   if unclosed_fence is not None or any(not record["structural"] for record in records):
     return False
   nonblank = [record["line"].rstrip("\r\n") for record in records if record["line"].strip()]
-  if not nonblank or not re.fullmatch(r"# PR #\d+ Code Review(?: 比較報告)?(?: · SHA [0-9a-f]+)?", nonblank[0]):
+  if not nonblank:
+    return False
+  if group:
+    title = re.fullmatch(rf"# Review set ({re.escape(expected_stable_id)}) Code Review 比較報告", nonblank[0]) \
+      if expected_stable_id else \
+      re.fullmatch(r"# Review set [0-9a-f]{12} Code Review 比較報告", nonblank[0])
+  else:
+    title = re.fullmatch(r"# PR #\d+ Code Review(?: 比較報告)?(?: · SHA [0-9a-f]+)?", nonblank[0])
+  if not title:
     return False
   metadata = nonblank[1:]
   if metadata and metadata[-1] == "---":
@@ -771,9 +1005,33 @@ def preamble_structure_is_valid(text):
   return bool(metadata) and all(PREAMBLE_METADATA_PATTERN.fullmatch(line) for line in metadata)
 
 
+def group_identity_lines(text):
+  header_lines = extract_header_lines(text)
+  identities = [
+    match.group(1)
+    for line in header_lines
+    for match in [SET_IDENTITY_PATTERN.fullmatch(line) or SET_IDENTITY_PATTERN.match(line)]
+    if match
+  ]
+  versions = [
+    match.group(1)
+    for line in header_lines
+    if line.startswith("**Target versions**:")
+    for match in [TARGET_VERSIONS_PATTERN.fullmatch(line)]
+    if match
+  ]
+  if len(identities) != 1 or len(versions) != 1:
+    return None
+  entries = versions[0].split(";")
+  if any(not VERSION_ENTRY_PATTERN.fullmatch(entry.strip()) for entry in entries) or not entries:
+    return None
+  return identities[0], [entry.strip() for entry in entries]
+
+
 def validate_source_contract(text, require_schema=False, allow_generation=True):
   header_lines = extract_header_lines(text)
-  schema_count = header_lines.count("**Report projection schema**: 1")
+  schema_count = sum(header_lines.count(line) for line in SCHEMA_LINES)
+  schema_version = projection_schema_version(text)
   generation_count = sum(
     line.rstrip("\r\n").startswith("**Report generation**:")
     for _, line in outside_fence_lines(text)
@@ -796,10 +1054,13 @@ def validate_source_contract(text, require_schema=False, allow_generation=True):
   required_state_counts = (
     sum(line.startswith("**覆蓋 (ENH-A)**:") for line in header_lines),
     sum(line.startswith("**Formal spec traceability (2.65)**:") for line in header_lines),
+    sum(line.startswith("**Prior review continuity**:") for line in header_lines),
   )
+  expected_state_counts = (1, 1, 1) if schema_version == 2 else (1, 1, 0)
   checks = {
-    "projection-schema": schema_count == 1,
+    "projection-schema": schema_count == 1 and schema_version is not None,
     "generation-cardinality": generation_count <= 1 if allow_generation else generation_count == 0,
+    "schema-family": schema_version != 3,
     "html-hidden-heading": not unclosed_html_block_hides_heading(text),
     "preamble-structure": preamble_structure_is_valid(text),
     "finding-table": canonical_tables == 1,
@@ -835,8 +1096,87 @@ def validate_source_contract(text, require_schema=False, allow_generation=True):
       and len(block_group_order) == len(set(block_group_order))
     ),
     "comment-blocks": not invalid_comment_blocks,
-    "required-state": required_state_counts == (1, 1),
+    "required-state": required_state_counts == expected_state_counts,
+    "prior-review-continuity": schema_version != 2 or prior_review_continuity_is_valid(text),
   }
+  failed = [name for name, passed in checks.items() if not passed]
+  if failed:
+    raise ValueError(f"source report contract mismatch: {', '.join(failed)}")
+
+
+def validate_group_source_contract(text, require_schema=False, allow_generation=True,
+                                   expected_stable_id=None):
+  header_lines = extract_header_lines(text)
+  schema_count = sum(header_lines.count(line) for line in SCHEMA_LINES)
+  schema_version = projection_schema_version(text)
+  generation_count = sum(
+    line.rstrip("\r\n").startswith("**Report generation**:")
+    for _, line in outside_fence_lines(text)
+  )
+  if require_schema and schema_count != 1:
+    raise ValueError("source report contract mismatch: projection-schema")
+  if schema_count == 0:
+    return
+  if expected_stable_id is not None:
+    title_match = re.match(r"(?m)^# Review set ([0-9a-f]{12}) Code Review 比較報告$", text)
+    if not title_match or title_match.group(1) != expected_stable_id:
+      raise ValueError("source report contract mismatch: title-stable-id")
+    identity = group_identity_lines(text)
+    if identity is not None and identity[0][7:19] != expected_stable_id:
+      raise ValueError("source report contract mismatch: identity-stable-id")
+  inventory, invalid_rows, canonical_tables = extract_finding_rows(text)
+  order, actions, priorities = extract_finding_actions(text)
+  uid_map, uid_actions, no_inline, uid_order, invalid_uid_records = extract_strict_uid_records(text)
+  payload_map, invalid_comment_blocks = extract_comment_block_contract(text)
+  block_records, _ = extract_finding_block_records(text)
+  block_group_order = []
+  for ordinal, _, _ in block_records:
+    if not block_group_order or block_group_order[-1] != ordinal:
+      block_group_order.append(ordinal)
+  unique_inventory = set(inventory)
+  uid_values = [uid_map[ordinal][0] for ordinal in unique_inventory if len(uid_map.get(ordinal, [])) == 1]
+  location_group_ids = extract_location_group_ids(text)
+  checks = {
+    "projection-schema": schema_count == 1 and schema_version == 3,
+    "generation-cardinality": generation_count <= 1 if allow_generation else generation_count == 0,
+    "html-hidden-heading": not unclosed_html_block_hides_heading(text),
+    "preamble-structure": preamble_structure_is_valid(text, group=True, expected_stable_id=expected_stable_id),
+    "finding-table": canonical_tables == 1,
+    "finding-summary-structure": finding_summary_structure_is_valid(text),
+    "finding-inventory": len(inventory) == len(unique_inventory),
+    "finding-sequence": inventory == list(range(1, len(inventory) + 1)),
+    "finding-rows": not invalid_rows,
+    "action-order": order == inventory,
+    "priority-order": priorities == sorted(priorities),
+    "action-coverage": set(actions) == unique_inventory,
+    "action-cardinality": all(len(actions.get(ordinal, [])) == 1 for ordinal in unique_inventory),
+    "uid-coverage": set(uid_map) == unique_inventory,
+    "uid-order": uid_order == inventory,
+    "uid-records": not invalid_uid_records,
+    "uid-cardinality": all(len(uid_map.get(ordinal, [])) == 1 for ordinal in unique_inventory),
+    "uid-uniqueness": len(uid_values) == len(set(uid_values)),
+    "uid-action": all(
+      len(uid_actions.get(ordinal, [])) == 1
+      and len(actions.get(ordinal, [])) == 1
+      and uid_actions[ordinal][0] == actions[ordinal][0]
+      for ordinal in unique_inventory
+    ),
+    "inline-exemption": no_inline <= unique_inventory,
+    "inline-exemption-action": all(actions.get(ordinal) == ["no-op"] for ordinal in no_inline),
+    "comment-coverage": set(payload_map) == unique_inventory - no_inline,
+    "comment-cardinality": all(
+      len(payload_map.get(ordinal, [])) >= 1
+      for ordinal in unique_inventory - no_inline
+    ),
+    "comment-preamble": inline_comment_preambles_are_empty(text),
+    "comment-order": (
+      block_group_order == [ordinal for ordinal in inventory if ordinal not in no_inline]
+      and len(block_group_order) == len(set(block_group_order))
+    ),
+    "comment-blocks": not invalid_comment_blocks,
+    "location-group-coverage": set(uid_values) == set(location_group_ids),
+  }
+  checks.update(group_source_checks(text))
   failed = [name for name, passed in checks.items() if not passed]
   if failed:
     raise ValueError(f"source report contract mismatch: {', '.join(failed)}")
@@ -886,8 +1226,55 @@ def validate_projection(source, projected):
     raise ValueError(f"projection integrity mismatch: {', '.join(failed)}")
 
 
-def should_keep(title):
-  return title in KEEP_TITLES
+def validate_group_projection(source, projected):
+  assert_balanced_fences(source)
+  assert_balanced_fences(projected)
+  source_preamble, source_sections = split_h2_sections(source)
+  projected_preamble, projected_sections = split_h2_sections(projected)
+  source_summaries = [section for title, section in source_sections if title == "發現總覽"]
+  projected_summaries = [section for title, section in projected_sections if title == "發現總覽"]
+  source_locations = [section for title, section in source_sections if title == SET_LOCATIONS_TITLE]
+  projected_locations = [section for title, section in projected_sections if title == SET_LOCATIONS_TITLE]
+  source_inline = sum(title in INLINE_TITLES for title, _ in source_sections)
+  source_inline += sum(
+    title in INLINE_TITLES
+    for section in source_summaries
+    for _, _, title in find_headings(section, 3)
+  )
+  projected_inline = sum(title in INLINE_TITLES for title, _ in projected_sections)
+  projected_inline += sum(
+    title in INLINE_TITLES
+    for section in projected_summaries
+    for _, _, title in find_headings(section, 3)
+  )
+  source_uids = extract_finding_uids(source)
+  projected_titles = [title for title, _ in projected_sections]
+  evidence_titles = [title for title in projected_titles if title.startswith("[完整證據副檔](")]
+  checks = {
+    "projected-section-allowlist": all(
+      title.startswith("[完整證據副檔](") or should_keep(title, group=True)
+      for title in projected_titles
+    ),
+    "projected-evidence-section": len(evidence_titles) == 1,
+    "projected-summary": len(projected_summaries) == 1,
+    "projected-locations": len(projected_locations) == 1,
+    "source-inline-comments": source_inline == 1,
+    "projected-inline-comments": projected_inline == 1,
+    "preamble": normalize_structure(source_preamble) == normalize_structure(projected_preamble),
+    "finding-summary": normalize_structure(finding_summary_scope(source)) == normalize_structure(finding_summary_scope(projected)),
+    "locations": normalize_structure(source_locations[0]) == normalize_structure(projected_locations[0])
+    if source_locations and projected_locations else False,
+    "finding-uids": all(uid in projected for uid in source_uids),
+    "comment-payloads": extract_actionable_comment_payloads(source) == extract_actionable_comment_payloads(projected),
+    "header-state": extract_state_lines(source) == extract_state_lines(projected),
+  }
+  failed = [name for name, passed in checks.items() if not passed]
+  if failed:
+    raise ValueError(f"projection integrity mismatch: {', '.join(failed)}")
+
+
+def should_keep(title, group=False):
+  return title in (GROUP_KEEP_TITLES if group else KEEP_TITLES)
 
 
 def add_generation_binding(source, generation):
@@ -928,6 +1315,33 @@ def project_report(source, audit_name, require_schema=False):
   joined = "\n\n".join(part for part in parts if part).rstrip()
   projected = remove_external_blank_lines(joined) + "\n"
   validate_projection(source, projected)
+  return projected
+
+
+def project_group_report(source, audit_name, require_schema=False):
+  assert_balanced_fences(source)
+  validate_group_source_contract(source, require_schema=require_schema)
+  preamble, sections = split_h2_sections(source)
+  uids = extract_finding_uids(source)
+  no_ops = extract_noop_ordinals(source)
+  audit_section = [f"## [完整證據副檔]({audit_name})"]
+  if uids:
+    links = " · ".join(f"[{uid}]({audit_name}#發現總覽)" for uid in uids)
+    audit_section.extend(["", LOCATION_UID_HEADING, "", links])
+  kept = []
+  for title, section in sections:
+    if not should_keep(title, group=True):
+      continue
+    if title == "發現總覽" or title in INLINE_TITLES:
+      section = filter_noop_inline_blocks(
+        strip_inline_comment_preamble(trim_after_inline_comments(section)),
+        no_ops,
+      )
+    kept.append(section.rstrip())
+  parts = [preamble.rstrip(), "\n".join(audit_section), *kept]
+  joined = "\n\n".join(part for part in parts if part).rstrip()
+  projected = remove_external_blank_lines(joined) + "\n"
+  validate_group_projection(source, projected)
   return projected
 
 
@@ -979,14 +1393,54 @@ def paths_alias(left, right):
     return False
 
 
+def absolute_path(path):
+  return Path(os.path.abspath(path))
+
+
+def canonical_report_identity(path):
+  normalized = path.resolve(strict=False)
+  single_error = None
+  try:
+    relative = normalized.relative_to(REPORT_ROOT)
+  except ValueError as error:
+    raise ValueError("report paths must be under the canonical report root") from error
+  if len(relative.parts) == 2 and relative.parts[0] == GROUP_ROOT_NAME:
+    for kind, pattern in GROUP_PATTERNS:
+      match = pattern.fullmatch(path.name)
+      if match:
+        return "group", kind, match.group(1)
+    raise ValueError("report paths must use canonical set report names")
+  if len(relative.parts) != 2:
+    raise ValueError("report paths must use exactly one repository directory")
+  for kind, pattern in REPORT_PATTERNS:
+    match = pattern.fullmatch(path.name)
+    if match:
+      return "single", kind, int(match.group(1))
+  raise ValueError("report paths must use canonical PR report names")
+
+
+def assert_canonical_report_paths(paths):
+  identities = [canonical_report_identity(path) for path in paths]
+  families = {family for family, _, _ in identities}
+  if len(families) != 1:
+    raise ValueError("draft, audit, and main paths must belong to one report family")
+  if [kind for _, kind, _ in identities] != ["draft", "audit", "main"]:
+    raise ValueError("draft, audit, and main paths must be the canonical three-file set")
+  keys = {key for _, _, key in identities}
+  if len(keys) != 1:
+    raise ValueError("draft, audit, and main paths must use one report identity")
+  return families.pop()
+
+
 def assert_distinct_report_paths(paths, lock_path):
   draft_path, audit_path, main_path = paths
   parents = {path.parent.resolve() for path in (*paths, lock_path)}
   if len(parents) != 1:
     raise ValueError("draft, audit, main, and lock must share one directory")
-  if any(path.parent != main_path.parent for path in (*paths, lock_path)):
+  main_parent = main_path.parent.resolve(strict=False)
+  if any(path.parent.resolve(strict=False) != main_parent for path in (*paths, lock_path)):
     raise ValueError("report paths must use the same canonical parent path")
-  if audit_path.absolute() != main_path.with_suffix(".audit.md").absolute():
+  if absolute_path(audit_path) != absolute_path(main_path.with_suffix(".audit.md")):
     raise ValueError("audit path must be the paired main .audit.md path")
   all_paths = (*paths, lock_path)
   for path in all_paths:
@@ -1042,9 +1496,34 @@ def recover_claimed_draft(draft_path):
   claim_directory.rmdir()
 
 
+def validate_bound_contract(source, group, audit_path=None, expected_stable_id=None):
+  if group:
+    validate_group_source_contract(source, require_schema=True, allow_generation=False,
+                                   expected_stable_id=expected_stable_id)
+    if audit_path is not None and audit_path.exists():
+      existing = read_report(audit_path)
+      validate_group_source_contract(existing, require_schema=True, allow_generation=True,
+                                     expected_stable_id=expected_stable_id)
+      draft_identity = group_identity_lines(source)
+      audit_identity = group_identity_lines(existing)
+      if draft_identity != audit_identity:
+        raise ValueError("source report contract mismatch: set-target-version-mismatch")
+  else:
+    validate_source_contract(source, require_schema=True, allow_generation=False)
+
+
+def project_bound_report(source, audit_name, group):
+  if group:
+    return project_group_report(source, audit_name, require_schema=True)
+  return project_report(source, audit_name, require_schema=True)
+
+
 def publish_report_pair(draft_path, audit_path, main_path):
+  report_paths = (draft_path, audit_path, main_path)
+  family = assert_canonical_report_paths(report_paths)
+  group = family == "group"
   lock_path = main_path.with_name(f".{main_path.name}.lock")
-  assert_distinct_report_paths((draft_path, audit_path, main_path), lock_path)
+  assert_distinct_report_paths(report_paths, lock_path)
   flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
   lock_descriptor = os.open(lock_path, flags, 0o600)
   with os.fdopen(lock_descriptor, "a") as lock_file:
@@ -1053,10 +1532,15 @@ def publish_report_pair(draft_path, audit_path, main_path):
     claim_directory, claimed_path = claim_draft(draft_path)
     try:
       source = read_report(claimed_path)
-      validate_source_contract(source, require_schema=True, allow_generation=False)
+      group_key = None
+      if group:
+        group_key = assert_canonical_report_paths(report_paths)
+        group_key = [key for family, kind, key in
+                     [canonical_report_identity(path) for path in report_paths]][0]
+      validate_bound_contract(source, group, audit_path, expected_stable_id=group_key)
       generation = hashlib.sha256(source.encode()).hexdigest()
       bound_source = add_generation_binding(source, generation)
-      projected = project_report(bound_source, audit_path.name, require_schema=True)
+      projected = project_bound_report(bound_source, audit_path.name, group)
       generation_line = f"**Report generation**: sha256:{generation}"
       if bound_source.count(generation_line) != 1 or projected.count(generation_line) != 1:
         raise ValueError("projection integrity mismatch: report-generation")

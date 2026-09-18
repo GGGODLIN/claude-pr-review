@@ -17,13 +17,16 @@ A single reviewer — human or model — has a single blind spot profile. This c
 | Context-aware reviewers | Claude Code subagents (`agents/`) | Language/domain specialists with full repo search access — catch cross-file gaps |
 | Codex neutral | `codex review` (bare CLI) | Diff-only, no context — reads the PR the way a reviewer reads a PR email |
 | Codex adversarial | Codex plugin red-team template | Actively attacks the change — catches fail-open, visibility, day-boundary hazards |
-| Gemini Flash | `agy` CLI (permanent axis) | Cheap independent pass — has repeatedly caught the only confirmed finding in a round |
-| Gemini Pro | `agy` CLI (opt-in) | Deeper but hallucination-prone — off by default |
+| Gemini Flash | `agy` CLI (recommended by default) | Cheap independent pass — has repeatedly caught the only confirmed finding in a round |
+| Gemini Pro | `agy` CLI (optional) | Deeper but hallucination-prone — off by default |
 
 The design principle borrowed from security auditing: **the agent that finds an issue never verifies it**. Context-aware findings are verified by the diff-only axis and vice versa (symmetric cross-verification), consensus findings still get a convention-baseline check, and no finding is ever dropped — refuted ones ship in the report with both sides' evidence so the human makes the final call.
 
 ## What you get
 
+- **A per-run selection matrix** — Step 2.98 lays the five axes (plus an experimental web GPT Pro path) out as a model×angle matrix, marks each cell `recommended` or `optional`, and waits for your choice. A recommendation is never consent: an unanswered prompt selects nothing, and an axis that fails is reported `FAILED` rather than quietly swapped for another model
+- **Multi-PR review sets** — pass more than one PR and the command prepares each target in its own worktree, picks seats once for the whole set, and emits a group report; built for front-end/back-end pairs whose contract defects are invisible when each side is reviewed alone
+- **Second-round continuity** — findings carry stable UIDs, so a later review reconciles the previous round into `FIXED` / `STILL_OPEN` / `STALE` instead of starting over. Prior findings are withheld from fresh reviewers so the second pass is not anchored by the first
 - **Coverage as set arithmetic, not trust** — every changed file must be explicitly accounted for (`finding` / `REVIEWED_NO_ISSUES` / `INTENTIONALLY_SKIPPED`), asserted deterministically after review
 - **Deterministic re-anchoring** — findings carry verbatim source anchors and are re-located by exact match before the report, so line numbers survive model drift
 - **Provenance discipline** — on hotfix→staging PRs, files inherited from the default branch are detected and capped so their defects don't land on an innocent author
@@ -43,7 +46,11 @@ scripts/pr-review-c4.py          deterministic spec-clause reducer + dispatch en
 scripts/pr-review-profile.py     resolves the optional per-repo profile (trunk / spec globs / conventions docs) from the git remote
 scripts/pr-review-report-projection.py   deterministic audit→main report projection (Step 6 publication)
 scripts/poll-liveness.sh         background-process poll helper (3-signal: done/dead/stuck)
+scripts/pr-review-targets.py     multi-target preparation: identity/version checks, per-target materials, capacity adjudication
+scripts/pr-review-cc-group-flow.py       one CC dispatch ledger across a multi-target set
+scripts/pr-review-group-report.py        group report assembly + group-wide finding UIDs
 scripts/sem-pr-blast-radius.sh   entity-level dependency blast radius (needs `sem`)
+model-routing.env                logical model ids resolved at dispatch time (install → ~/.claude/)
 hooks/pr-review-c4-dispatch-gate.py     optional PreToolUse permit gate for the formal-spec dispatch
 references/severity-calibration.md      security impact×likelihood matrix
 references/finding-severity-rules.md    6c/6d gates: Must/Should/Nice calibration (platform-neutral SSOT)
@@ -78,8 +85,8 @@ Tiered honestly — the command degrades gracefully when an axis is missing (it 
 
 - The Codex sections mutate `~/.codex/config.toml` during a run (MCP strip + effort override, pristine-backup + restore). Read Step 3 and Step 7 before first use.
 - `skills/bitbucket-pr-mutation` is the only write path to Bitbucket and is deliberately ceremony-heavy (typed approval, proposal hashing, read-back). Its contract tests also pin the command's Step 8 wording — run `cd skills/bitbucket-pr-mutation/scripts && python3 -m unittest discover -s tests -q` after editing either file.
-- `commands/pr-review.md` is additionally pinned by three contract tests in `commands/tests/` (report projection wiring, C4 dispatch envelope, report Self-Verify). Run all three after editing the command or the `spec-compliance-reviewer` agent — the command's header lists the exact invocations.
-- **Test coverage, stated honestly**: those three are *text* contract tests — they assert that specific wording still exists in the command, and do not execute a review, the projection helper, or the dispatch gate. No behavioral test suite ships for `scripts/pr-review-report-projection.py`, `scripts/pr-review-c4.py`, or `hooks/pr-review-c4-dispatch-gate.py`. Treat the C4 dispatch permit lifecycle in particular as unexercised here: a permit is keyed per Claude Code session and is not reissued once one has been granted, so a second formal-spec dispatch in the same session finalizes `SKIPPED` with `C4_DISPATCH_PERMIT_EXISTS`. Start a fresh session for the next PR, and read the permit code before relying on it.
+- `commands/pr-review.md` is additionally pinned by eleven contract tests in `commands/tests/` (report projection, C4 dispatch envelope, report Self-Verify, repo profile, spec transport, prior-round continuity, multi-target preparation, group report, and the Gemini/web, CC, and Codex group-material paths). Run all eleven after editing the command or the `spec-compliance-reviewer` agent — the command's header lists the exact invocations.
+- **Test coverage, stated honestly**: those eleven are *text* contract tests — they assert that specific wording still exists in the command, and do not execute a review, the projection helper, or the dispatch gate. No behavioral test suite ships for `scripts/pr-review-report-projection.py`, `scripts/pr-review-c4.py`, or `hooks/pr-review-c4-dispatch-gate.py`. Treat the C4 dispatch permit lifecycle in particular as unexercised here: a permit is keyed per Claude Code session and is not reissued once one has been granted, so a second formal-spec dispatch in the same session finalizes `SKIPPED` with `C4_DISPATCH_PERMIT_EXISTS`. Start a fresh session for the next PR, and read the permit code before relying on it.
 - Costs are real: a default-preset run of a mid-size PR spends tens of minutes wall-clock and millions of Codex tokens. Presets (`light` / `sol-lite`) exist for a reason.
 
 ## License
