@@ -4,8 +4,6 @@ import argparse
 import fcntl
 import datetime
 import hashlib
-import json
-import pathlib
 import os
 import re
 import stat
@@ -1557,48 +1555,17 @@ def archive_previous_group_reports(audit_path, main_path):
         raise ValueError("group report archive collision: {}".format(backup.name))
       path.replace(backup)
       archived.append((backup, path))
-      write_archive_journal(audit_path, archived)
   except Exception:
     restore_archived_group_reports(archived)
-    clear_archive_journal(audit_path)
     raise
   return archived
 
 
-def archive_journal_path(audit_path):
-  return audit_path.with_name(f".{audit_path.name}.archive.json")
-
-
-def write_archive_journal(audit_path, archived):
-  payload = [[str(backup), str(original)] for backup, original in archived]
-  journal = archive_journal_path(audit_path)
-  journal.write_text(json.dumps(payload), encoding="utf-8")
-  return journal
-
-
-def clear_archive_journal(audit_path):
-  archive_journal_path(audit_path).unlink(missing_ok=True)
-
-
-def recover_interrupted_archive(audit_path):
-  """程序中途死掉時，把上一輪報告從備份接回正式路徑。
-
-  publish 在取得鎖之後、動任何檔案之前呼叫。沒有紀錄檔就是無事可做。
-  """
-  journal = archive_journal_path(audit_path)
-  if not journal.exists():
-    return
-  try:
-    entries = json.loads(journal.read_text(encoding="utf-8"))
-  except ValueError as error:
-    raise ValueError("interrupted archive journal is unreadable") from error
-  archived = [(pathlib.Path(backup), pathlib.Path(original)) for backup, original in entries]
-  restore_archived_group_reports([pair for pair in archived if pair[0].exists()])
-  journal.unlink(missing_ok=True)
-
-
 def restore_archived_group_reports(archived):
-  """把備份搬回正式路徑，用於發布失敗或中斷後還原上一輪報告對。
+  """把備份搬回正式路徑，用於發布失敗時還原上一輪報告對。
+
+  涵蓋範圍限於「本次執行拋出例外」：程序被強制中止時，上一輪的內容仍在
+  `.bak.md`，但正式路徑會維持缺檔，要人手動搬回。刻意不做自動重放。
 
   每一筆都嘗試，單筆失敗不放棄其餘；全部試完才把失敗的一起回報，
   錯誤訊息點名還留在哪些備份檔，讓人接手得回去。
@@ -1624,8 +1591,6 @@ def publish_report_pair(draft_path, audit_path, main_path):
   lock_descriptor = os.open(lock_path, flags, 0o600)
   with os.fdopen(lock_descriptor, "a") as lock_file:
     fcntl.flock(lock_file, fcntl.LOCK_EX)
-    if group:
-      recover_interrupted_archive(audit_path)
     recover_claimed_draft(draft_path)
     claim_directory, claimed_path = claim_draft(draft_path)
     try:
@@ -1682,8 +1647,6 @@ def publish_report_pair(draft_path, audit_path, main_path):
       raise
     claimed_path.unlink()
     claim_directory.rmdir()
-    if group:
-      clear_archive_journal(audit_path)
 
 
 def main():
