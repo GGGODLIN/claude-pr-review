@@ -2,6 +2,7 @@
 
 import argparse
 import fcntl
+import datetime
 import hashlib
 import os
 import re
@@ -1507,8 +1508,12 @@ def validate_bound_contract(source, group, audit_path=None, expected_stable_id=N
                                      expected_stable_id=expected_stable_id)
       draft_identity = group_identity_lines(source)
       audit_identity = group_identity_lines(existing)
-      if draft_identity != audit_identity:
-        raise ValueError("source report contract mismatch: set-target-version-mismatch")
+      if draft_identity is None or audit_identity is None:
+        raise ValueError("source report contract mismatch: set-identity-unreadable")
+      # 只比 set 身分，不比版本清單：同一組 PR 推了新 commit 之後重審，版本本來就會變，
+      # 那正是重審的理由。比版本會讓合法的新一輪永遠發不出去。覆蓋前先備份舊報告（下方）。
+      if draft_identity[0] != audit_identity[0]:
+        raise ValueError("source report contract mismatch: set-identity-mismatch")
   else:
     validate_source_contract(source, require_schema=True, allow_generation=False)
 
@@ -1517,6 +1522,23 @@ def project_bound_report(source, audit_name, group):
   if group:
     return project_group_report(source, audit_name, require_schema=True)
   return project_report(source, audit_name, require_schema=True)
+
+
+def archive_previous_group_reports(audit_path, main_path):
+  """覆蓋前把上一輪的群組報告改名成帶 UTC 時間戳的備份，留在同一個目錄。
+
+  檔名維持固定（一組一份、可被下一輪覆蓋），所以下一輪找前輪報告的路徑不用改；
+  歷史則以 <name>.<YYYYmmddTHHMMSSZ>.bak.md 保留。備份失敗就讓發布失敗，
+  不靜默把舊報告蓋掉。
+  """
+  stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+  for path in (audit_path, main_path):
+    if not path.exists():
+      continue
+    backup = path.with_name(f"{path.name}.{stamp}.bak.md")
+    if backup.exists():
+      raise ValueError("group report archive collision: {}".format(backup.name))
+    path.replace(backup)
 
 
 def publish_report_pair(draft_path, audit_path, main_path):
@@ -1545,6 +1567,8 @@ def publish_report_pair(draft_path, audit_path, main_path):
       generation_line = f"**Report generation**: sha256:{generation}"
       if bound_source.count(generation_line) != 1 or projected.count(generation_line) != 1:
         raise ValueError("projection integrity mismatch: report-generation")
+      if group:
+        archive_previous_group_reports(audit_path, main_path)
       audit_existed = audit_path.exists()
       audit_backup = audit_path.read_bytes() if audit_existed else None
       audit_mode = audit_path.stat().st_mode & 0o777 if audit_existed else None
