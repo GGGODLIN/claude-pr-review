@@ -25,6 +25,7 @@ GROUP_PATTERNS = (
   ("draft", re.compile(r"set-([0-9a-f]{12})-review\.audit\.draft\.md")),
 )
 GROUP_ROOT_NAME = "sets"
+ZERO_FINDING_MARKER = "本輪零 finding：跨目標位置表沒有資料列，這是正常結果，不是表格損壞。"
 GROUP_SCHEMA_LINE = "**Report projection schema**: 3"
 UID_PATTERN = re.compile(r"(?<![0-9a-f])([0-9a-f]{20})(?![0-9a-f])")
 SCHEMA_LINES = {
@@ -867,7 +868,7 @@ def set_locations_is_valid(text):
       return False
     rows.append(cells)
   if not rows:
-    return False
+    return ZERO_FINDING_MARKER in matches[0]
   columns = {name: position for position, name in enumerate(headers)}
   group_ids = [cells[columns["group_id"]] for cells in rows]
   uids = [cells[columns["finding_uid"]] for cells in rows]

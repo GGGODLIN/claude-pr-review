@@ -15,6 +15,7 @@ SCHEMA_LINE = "**Report projection schema**: 3"
 SET_IDENTITY_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 LOCATIONS_TITLE = "跨目標位置"
 LOCATION_HEADERS = ("group_id", "finding_uid", "target_identity", "file", "line", "source")
+ZERO_FINDING_MARKER = "本輪零 finding：跨目標位置表沒有資料列，這是正常結果，不是表格損壞。"
 PRIOR_REVIEW_TITLE = "上一輪 findings 對帳"
 INLINE_TITLE = "Inline Comments per Finding"
 SUMMARY_NOTICE = "auto-fix 只是處置建議；沒有使用者另行下令，不修改 code、commit、push 或 PR。"
@@ -429,6 +430,8 @@ def render_draft(payload):
   lines.extend(["", f"## {LOCATIONS_TITLE}", "",
                 "| " + " | ".join(LOCATION_HEADERS) + " |",
                 "|" + "---|" * len(LOCATION_HEADERS)])
+  if not any(group["locations"] for group in data["groups"]):
+    lines.append(ZERO_FINDING_MARKER)
   for group in data["groups"]:
     for location in group["locations"]:
       lines.append("| {} | {} | {} | {} | {} | {} |".format(
