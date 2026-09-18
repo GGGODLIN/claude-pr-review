@@ -4,6 +4,8 @@ import argparse
 import fcntl
 import datetime
 import hashlib
+import json
+import pathlib
 import os
 import re
 import stat
@@ -858,6 +860,9 @@ def set_locations_is_valid(text):
   if len(header_indexes) != 1:
     return False
   index = header_indexes[0]
+  # 表頭之前只能有 H2 標題與空白行；夾在前面的壞列同樣會留在報告裡。
+  if any(line.strip() and not line.strip().startswith("## ") for line in lines[:index]):
+    return False
   if index + 1 >= len(lines):
     return False
   separator_cells = table_cells(lines[index + 1])
@@ -872,11 +877,14 @@ def set_locations_is_valid(text):
       return False
     rows.append(cells)
   if not rows:
-    # 空表只有在「表頭、分隔線之後，整段剩下的非空白行恰好就是一行標記」時才合法。
-    # 不能用子字串搜尋：標記放在壞列之前會讓上面的迴圈提早 break、壞列不進驗證；
-    # 藏進 HTML 註解或前面加一句否定，子字串一樣搜得到。
-    tail = [line.strip() for line in lines[index + 2:] if line.strip()]
-    return tail == [ZERO_FINDING_MARKER]
+    # 空表只有在「整段原文除了 H2 標題、表頭、分隔線之外，恰好只剩一行標記」時才合法。
+    # 必須用 section 原文比對，不能用 outside_fence_lines 的結果：那個結果已經把
+    # 程式碼區塊、HTML 註解與縮排區塊濾掉，壞列藏在裡面就驗不到。也不能只看
+    # 表頭之後，壞列放在表頭之前一樣會留在報告裡。
+    raw = [line.strip() for line in matches[0].splitlines() if line.strip()]
+    if raw and raw[0].startswith("## "):
+      raw = raw[1:]
+    return raw == [lines[index].strip(), lines[index + 1].strip(), ZERO_FINDING_MARKER]
   columns = {name: position for position, name in enumerate(headers)}
   group_ids = [cells[columns["group_id"]] for cells in rows]
   uids = [cells[columns["finding_uid"]] for cells in rows]
@@ -1549,19 +1557,61 @@ def archive_previous_group_reports(audit_path, main_path):
         raise ValueError("group report archive collision: {}".format(backup.name))
       path.replace(backup)
       archived.append((backup, path))
+      write_archive_journal(audit_path, archived)
   except Exception:
     restore_archived_group_reports(archived)
+    clear_archive_journal(audit_path)
     raise
   return archived
 
 
-def restore_archived_group_reports(archived):
-  """把備份搬回正式路徑，用於發布失敗時還原上一輪報告對。
+def archive_journal_path(audit_path):
+  return audit_path.with_name(f".{audit_path.name}.archive.json")
 
+
+def write_archive_journal(audit_path, archived):
+  payload = [[str(backup), str(original)] for backup, original in archived]
+  journal = archive_journal_path(audit_path)
+  journal.write_text(json.dumps(payload), encoding="utf-8")
+  return journal
+
+
+def clear_archive_journal(audit_path):
+  archive_journal_path(audit_path).unlink(missing_ok=True)
+
+
+def recover_interrupted_archive(audit_path):
+  """程序中途死掉時，把上一輪報告從備份接回正式路徑。
+
+  publish 在取得鎖之後、動任何檔案之前呼叫。沒有紀錄檔就是無事可做。
+  """
+  journal = archive_journal_path(audit_path)
+  if not journal.exists():
+    return
+  try:
+    entries = json.loads(journal.read_text(encoding="utf-8"))
+  except ValueError as error:
+    raise ValueError("interrupted archive journal is unreadable") from error
+  archived = [(pathlib.Path(backup), pathlib.Path(original)) for backup, original in entries]
+  restore_archived_group_reports([pair for pair in archived if pair[0].exists()])
+  journal.unlink(missing_ok=True)
+
+
+def restore_archived_group_reports(archived):
+  """把備份搬回正式路徑，用於發布失敗或中斷後還原上一輪報告對。
+
+  每一筆都嘗試，單筆失敗不放棄其餘；全部試完才把失敗的一起回報，
+  錯誤訊息點名還留在哪些備份檔，讓人接手得回去。
   呼叫端必須先清掉這輪可能只寫了一半的新檔，否則 replace 會直接覆蓋它們。
   """
+  failures = []
   for backup, original in reversed(archived):
-    backup.replace(original)
+    try:
+      backup.replace(original)
+    except OSError as error:
+      failures.append(f"{backup.name} -> {original.name}: {error}")
+  if failures:
+    raise ValueError("group report restore incomplete; previous round still in: " + "; ".join(failures))
 
 
 def publish_report_pair(draft_path, audit_path, main_path):
@@ -1574,6 +1624,8 @@ def publish_report_pair(draft_path, audit_path, main_path):
   lock_descriptor = os.open(lock_path, flags, 0o600)
   with os.fdopen(lock_descriptor, "a") as lock_file:
     fcntl.flock(lock_file, fcntl.LOCK_EX)
+    if group:
+      recover_interrupted_archive(audit_path)
     recover_claimed_draft(draft_path)
     claim_directory, claimed_path = claim_draft(draft_path)
     try:
@@ -1596,17 +1648,27 @@ def publish_report_pair(draft_path, audit_path, main_path):
       audit_existed = audit_path.exists()
       audit_backup = audit_path.read_bytes() if audit_existed else None
       audit_mode = audit_path.stat().st_mode & 0o777 if audit_existed else None
+      audit_replaced = False
       try:
         write_main_report(audit_path, bound_source)
+        audit_replaced = True
         write_main_report(main_path, projected)
       except Exception:
         if archived:
           # 這輪的新檔可能只寫了一半：先清掉，再把上一輪原封搬回正式路徑。
           # 備份必須在寫入之前就納入同一筆交易，否則 audit_existed 在備份後必為
           # False，舊的復原分支會改走刪除、把兩個正式路徑一起弄不見。
-          audit_path.unlink(missing_ok=True)
-          main_path.unlink(missing_ok=True)
+          # 清除逐檔容錯：單一 unlink 失敗不放棄其餘還原。
+          for path in (audit_path, main_path):
+            try:
+              path.unlink(missing_ok=True)
+            except OSError:
+              pass
           restore_archived_group_reports(archived)
+        elif not audit_replaced:
+          # 正式 audit 根本還沒被換掉，不要對它做重寫式還原——那會換掉 inode、
+          # 掉 xattr，把一個完全沒碰過的舊檔弄壞。
+          pass
         elif audit_existed:
           write_report_bytes(audit_path, audit_backup)
           audit_path.chmod(audit_mode)
@@ -1620,6 +1682,8 @@ def publish_report_pair(draft_path, audit_path, main_path):
       raise
     claimed_path.unlink()
     claim_directory.rmdir()
+    if group:
+      clear_archive_journal(audit_path)
 
 
 def main():
