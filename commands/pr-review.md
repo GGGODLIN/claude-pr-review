@@ -1246,7 +1246,7 @@ Do NOT delete the finding — the final report will show your verdict alongside 
 
 不能用 `codex review`（PR-wide review、不是 per-finding fact-check）。走 `codex-companion.mjs task` 模式（同 Step 3 Fallback 的 codex-rescue 路徑）。
 
-**Batch 是唯一選項**：Codex shared runtime 一次只能一個 job、並行會 wedge（見 `~/.claude/references/codex-rescue.md`）。所有待驗 CC findings 包成一個 prompt、一輪解決。
+**Batch 是唯一選項**：Codex shared runtime 一次只能一個 job、並行會 wedge。所有待驗 CC findings 包成一個 prompt、一輪解決。
 
 ```bash
 CODEX_PLUGIN_DIR=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ 2>/dev/null | sort -V | tail -1)
@@ -1806,7 +1806,7 @@ Weighted by verification verdict, but **all findings from selected cells are sti
 
 Before final report output, refetch the current PR source／destination repository UUIDs and full SHA values. Compare them with `review_input_basis`, compute `source_continuity`, `base_changed`, and `review_context_changed`, and list exact new commits when ancestry proves `NEW_COMMITS`. This is a notification only: do not auto-review, delete findings, or alter severity. Refetch and render the same status again immediately before any Bitbucket mutation preview in Step 8.
 
-1. 先設 `REPORT_DIR="$HOME/.claude/pr-review-reports/$(basename "$REPO_ROOT")"` 並 `mkdir -p "$REPORT_DIR"`（統一輸出區、按 repo 分資料夾：報告不再落 repo 內，），把 Step 5 的完整 canonical report 寫到 `$REPORT_DIR/pr-<number>-review.audit.draft.md`。這是尚未發布的唯一輸入，不得直接改寫已發布的 `.audit.md`。
+1. 先設 `REPORT_DIR="$HOME/.claude/pr-review-reports/$(basename "$REPO_ROOT")"` 並 `mkdir -p "$REPORT_DIR"`（統一輸出區、按 repo 分資料夾：報告不再落 repo 內），把 Step 5 的完整 canonical report 寫到 `$REPORT_DIR/pr-<number>-review.audit.draft.md`。這是尚未發布的唯一輸入，不得直接改寫已發布的 `.audit.md`。
 2. 對這份完整證據草稿執行一次正式報告 Self-Verify。使用 `Agent` tool、`subagent_type: skill-verify-auditor`，description 固定含唯一 marker `skill-verify:pr-review`。Auditor 是未參與前面審查的唯讀 agent；prompt 只內嵌：(a) 完整證據草稿全文，(b) 下方固定 rubric 全文。不得重新審查 diff、API、Git 或 transcript，也不得讀取其他產物來善意補足報告缺口。
 3. 嚴格驗證 auditor 輸出後再解析 verdict：必須恰好含 R1–R10 各一行、順序固定、每行狀態只能是 rubric 允許的 PASS／FAIL／N-A，且最後恰好一行 verdict。任一 R 行為 FAIL 時 verdict 必須列出完全相同的 R 編號集合；所有 R 行皆 PASS／N-A 時 verdict 才能是 `VERDICT: COMPLIANT`。缺行、重複、順序錯、狀態不合法、FAIL 集合不一致、只有 verdict 無逐條證據，全部視為格式錯誤，不得只信最後一行。
    - 完整且一致的 `VERDICT: COMPLIANT` → 接發布。
