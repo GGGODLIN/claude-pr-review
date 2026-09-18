@@ -858,7 +858,10 @@ def set_locations_is_valid(text):
   if len(header_indexes) != 1:
     return False
   index = header_indexes[0]
-  if index + 1 >= len(lines) or not is_table_separator(table_cells(lines[index + 1])):
+  if index + 1 >= len(lines):
+    return False
+  separator_cells = table_cells(lines[index + 1])
+  if not is_table_separator(separator_cells) or len(separator_cells) != len(headers):
     return False
   rows = []
   for line in lines[index + 2:]:
@@ -869,7 +872,11 @@ def set_locations_is_valid(text):
       return False
     rows.append(cells)
   if not rows:
-    return ZERO_FINDING_MARKER in matches[0]
+    # 空表只有在「表頭、分隔線之後，整段剩下的非空白行恰好就是一行標記」時才合法。
+    # 不能用子字串搜尋：標記放在壞列之前會讓上面的迴圈提早 break、壞列不進驗證；
+    # 藏進 HTML 註解或前面加一句否定，子字串一樣搜得到。
+    tail = [line.strip() for line in lines[index + 2:] if line.strip()]
+    return tail == [ZERO_FINDING_MARKER]
   columns = {name: position for position, name in enumerate(headers)}
   group_ids = [cells[columns["group_id"]] for cells in rows]
   uids = [cells[columns["finding_uid"]] for cells in rows]
@@ -1532,13 +1539,29 @@ def archive_previous_group_reports(audit_path, main_path):
   不靜默把舊報告蓋掉。
   """
   stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-  for path in (audit_path, main_path):
-    if not path.exists():
-      continue
-    backup = path.with_name(f"{path.name}.{stamp}.bak.md")
-    if backup.exists():
-      raise ValueError("group report archive collision: {}".format(backup.name))
-    path.replace(backup)
+  archived = []
+  try:
+    for path in (audit_path, main_path):
+      if not path.exists() and not path.is_symlink():
+        continue
+      backup = path.with_name(f"{path.name}.{stamp}.bak.md")
+      if backup.exists() or backup.is_symlink():
+        raise ValueError("group report archive collision: {}".format(backup.name))
+      path.replace(backup)
+      archived.append((backup, path))
+  except Exception:
+    restore_archived_group_reports(archived)
+    raise
+  return archived
+
+
+def restore_archived_group_reports(archived):
+  """把備份搬回正式路徑，用於發布失敗時還原上一輪報告對。
+
+  呼叫端必須先清掉這輪可能只寫了一半的新檔，否則 replace 會直接覆蓋它們。
+  """
+  for backup, original in reversed(archived):
+    backup.replace(original)
 
 
 def publish_report_pair(draft_path, audit_path, main_path):
@@ -1567,16 +1590,24 @@ def publish_report_pair(draft_path, audit_path, main_path):
       generation_line = f"**Report generation**: sha256:{generation}"
       if bound_source.count(generation_line) != 1 or projected.count(generation_line) != 1:
         raise ValueError("projection integrity mismatch: report-generation")
+      archived = []
       if group:
-        archive_previous_group_reports(audit_path, main_path)
+        archived = archive_previous_group_reports(audit_path, main_path)
       audit_existed = audit_path.exists()
       audit_backup = audit_path.read_bytes() if audit_existed else None
       audit_mode = audit_path.stat().st_mode & 0o777 if audit_existed else None
-      write_main_report(audit_path, bound_source)
       try:
+        write_main_report(audit_path, bound_source)
         write_main_report(main_path, projected)
       except Exception:
-        if audit_existed:
+        if archived:
+          # 這輪的新檔可能只寫了一半：先清掉，再把上一輪原封搬回正式路徑。
+          # 備份必須在寫入之前就納入同一筆交易，否則 audit_existed 在備份後必為
+          # False，舊的復原分支會改走刪除、把兩個正式路徑一起弄不見。
+          audit_path.unlink(missing_ok=True)
+          main_path.unlink(missing_ok=True)
+          restore_archived_group_reports(archived)
+        elif audit_existed:
           write_report_bytes(audit_path, audit_backup)
           audit_path.chmod(audit_mode)
         else:
