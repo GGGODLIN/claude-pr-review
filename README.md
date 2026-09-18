@@ -64,6 +64,16 @@ Install: see [INSTALL.md](INSTALL.md) — an agent-executable guide (point Claud
 
 **Minimum install (GitHub-only)** = `commands/` + `agents/` + `references/` + `scripts/` — the command dispatches reviewers by the agent names defined in `agents/`, reads both reference files during severity calibration, and probes the bundled scripts at fixed steps (they self-skip when their underlying tool is absent, but the files must exist for the skip to be graceful). `skills/bitbucket-*` only if you review Bitbucket PRs.
 
+## Upgrading from an earlier install
+
+Three things move if you already had this installed:
+
+- **Reports land elsewhere.** They now go to `~/.claude/pr-review-reports/<repo>/` instead of the repository root, so nothing review-related is written into the repo under review.
+- **Seats are chosen per run.** Step 2.98 prints the matrix and waits for your pick instead of firing a fixed axis set. Answering "照推薦" takes the recommended cells; leaving it unanswered in an interactive run selects nothing. An unattended run (`/goal` and friends, nobody there to answer) falls back to the recommended set, so automation keeps its previous behaviour.
+- **The standalone Gemini Pro question is gone.** Both Gemini seats are cells in the matrix now; Flash stays recommended by default and Pro stays optional.
+
+Reinstall by re-running the copy steps in [INSTALL.md](INSTALL.md) — `cp scripts/*` picks up the new helpers, and `model-routing.env` is a new file the Gemini seats read.
+
 ## Prerequisites
 
 Tiered honestly — the command degrades gracefully when an axis is missing (it reports the gap instead of failing the review):

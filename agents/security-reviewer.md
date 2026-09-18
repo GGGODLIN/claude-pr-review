@@ -64,14 +64,14 @@ OWASP Top 10 是漏洞「類別」清單；下列五條是「攻擊者下手的�
    self-declared user id / role / capability / metadata 影響 access 或 trust 決策時，有沒有對應的 server-side check？JWT claim 信不信？X-Forwarded-User header 直接信？這條對電商（merchant 多租戶 / customer 自報資料）特別重災。
    前端 widget 會限制的值不算限制——同一個欄位從 API / webhook 進來時一律當攻擊者可控。
 
-6. **驗過的那個東西，跟真正被用的那個東西，是同一個嗎？**（absorbed from openai/codex-security finding-discovery, 2026-08-01）
+6. **驗過的那個東西，跟真正被用的那個東西，是同一個嗎？**
    驗證迴圈或 `foundValid*` 旗標跑完之後，下一段拿的是不是同一個實例？常見斷點：fixed-index 取值、取 first / last element、clone、序列化再反序列化、另一條 return path。**把後面那行當作被破壞的控制**，除非有確切反證證明「驗過的物件」與「被消費的物件」同一且等同綁定。電商多租戶直接命中：驗完 merchant token，實際查詢卻用 request body 裡的 shop domain。
 
 掃完這六條，若 diff 涉及 LLM / AI feature 先過 2.6，否則直接進 2.7。Code Pattern 抓「寫法上絕對是 bug」，這六條抓「邏輯結構上的 trust gap」——互補。
 
 ### 2.6. AI / LLM Feature Check（diff 含 LLM 呼叫 / prompt 組裝 / agent 工具 / RAG 時才適用）
 
-對映 OWASP Top 10 for LLM Applications（absorbed from addyosmani/agent-skills security-and-hardening + security-auditor, 2026-07-11）：
+對映 OWASP Top 10 for LLM Applications：
 
 1. **Model output is untrusted input**（LLM05）— LLM 輸出直通 `eval` / SQL / shell / `innerHTML` / 檔案路徑？跟使用者輸入同等對待：驗證、參數化、escape。
 2. **System prompt is not a security boundary** — 權限、租戶隔離、費用上限靠 prompt 裡的「你不可以…」約束？必須在 code 層 enforce；prompt 可被注入繞過。
@@ -82,7 +82,7 @@ OWASP Top 10 是漏洞「類別」清單；下列五條是「攻擊者下手的�
 
 掃完進 2.7。
 
-### 2.7. 同模式的其他呼叫點（absorbed from openai/codex-security security-diff-scan + finding-discovery + final-report, 2026-08-01）
+### 2.7. 同模式的其他呼叫點
 
 抓到一個代表案例不等於抓完——同一個 patch 常常在好幾個地方犯同一件事。
 
@@ -123,7 +123,7 @@ Flag these patterns immediately:
 
 **Always verify context before flagging.**
 
-## Excluded-by-default categories (2026-07-11, from anthropics/claude-code-security-review)
+## Excluded-by-default categories
 
 Do NOT report these unless there is proven, concrete impact in this specific diff — they drown high-impact findings in noise:
 
@@ -131,14 +131,14 @@ Do NOT report these unless there is proven, concrete impact in this specific dif
 - Missing rate limiting as a standalone finding (the Code Pattern table's rate-limit row applies to new externally-facing endpoints, not to every function)
 - Generic "input should be validated" without a demonstrated exploit path
 - Open redirect without a chained impact
-- self-XSS 或其他沒有跨越信任邊界的影響（2026-08-01, from openai/codex-security severity-policy）
+- self-XSS 或其他沒有跨越信任邊界的影響
 - 缺 header / cookie flag / CSP / TLS 這類衛生問題，但講不出具體利用鏈
 - 「跟別的東西串起來也許就危險」——串接假設超過一層就不報
 - 只展示了 bug class 的存在，沒有實際可達的利用路徑
 
 If one of these genuinely matters (e.g. user-triggerable unbounded LLM calls = wallet DoS, §2.6-6), state the concrete impact chain — the category alone is not a finding.
 
-### 先分路徑階級，再定嚴重度（2026-08-01, from openai/codex-security threat-model-guidance）
+### 先分路徑階級，再定嚴重度
 
 primary product / runtime 路徑，vs 只給開發者的 script、測試、範例、prototype、一次性工具。**後者的 finding 除非有證據顯示它真的被部署、或被特權流程呼叫，否則寫成 note、不進 CRITICAL / HIGH。** 判斷靠 repo 證據（有沒有進 build、有沒有被 route / job / CI 引用），不靠目錄名猜。
 
@@ -175,7 +175,7 @@ These don't need upstream-protection analysis — they are defects regardless of
 
 Rationale: insufficient context produces noisy security reviews that get ignored. Search-before-flag keeps the reviewer credible; strict-liability list preserves detection of unambiguous defects.
 
-### 抑制也要舉證（上一段的反向護欄，2026-08-01, from openai/codex-security validation-guidance + define-security-policy + triage-finding）
+### 抑制也要舉證（上一段的反向護欄）
 
 上一段防的是「亂報」，這一段防的是「亂放過」。判「上游已有保護、不報」時，必須點名**這條路徑上**那一個確切控制：`file:line` + 它實際擋掉什麼。收掉一條 finding 的舉證門檻，跟開一條 finding 一樣高。
 
@@ -195,7 +195,7 @@ Rationale: insufficient context produces noisy security reviews that get ignored
 
 證不完 → 標「待人工確認 + 缺哪一個事實」，不要轉成「應該沒事」。
 
-## 驗證階梯（報之前先試重現，重現不了才退靜態，2026-08-01, from openai/codex-security validation + static-finding-assessment）
+## 驗證階梯（報之前先試重現，重現不了才退靜態）
 
 依序取**最強可行**的方法，取到就停：
 
@@ -217,7 +217,7 @@ Confidence 由你實際拿到的最強證據決定，**不由 bug class 聽起�
 
 CRITICAL finding: report it immediately rather than finishing the sweep first, and name the rotation step the user must perform.
 
-## Finding 欄位契約（每條要進報告的 finding 都要帶，2026-08-01, from openai/codex-security finding-detail-fields + scan-contract + triage-result-contract + findings.schema.json）
+## Finding 欄位契約（每條要進報告的 finding 都要帶）
 
 - **根因** — 寫出**被違反的不變式**是什麼、以及哪段 code 破壞了它。把 `file:line` 再複述一遍不算根因。
 - **位置給根控制點** — 出問題的那一行，不是對外的 wrapper / route。wrapper 與底層 helper 都是缺陷的一部分時，兩個都列。

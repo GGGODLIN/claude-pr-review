@@ -598,7 +598,9 @@ Deterministic CLI = same output every run → do **NOT** inject results into any
 
 每個可配 cell 另外標一個 `recommendation`（`recommended` 或 `optional`）與一個 `status`：`selected | not-selected | cancelled | unavailable | needs-material`。推薦不等於必跑；同級 model 只是可選路徑，不是品質排名。`selected` cell 必須保留 `path`、requested model／effort、適用條件與 selection reason；runtime 回來後再填 observed model，不猜底層識別。
 
-先向 user 展示完整矩陣，再用自然語言取得當次選擇，例如「照推薦」「取消 primary」「加 security」「只用 Codex 中性」「把 Flash 換成 Pro」。已有明確指定就沿用，不重問同一決定；推薦只在 user 說「照推薦」時轉成 `selected`。未回覆不等於接受推薦。無人值守時只可沿用已明確保存的 `REVIEW_SELECTION`；沒有就標 `REVIEW_SELECTION=SKIPPED`，不派任何 reviewer。
+先向 user 展示完整矩陣，再用自然語言取得當次選擇，例如「照推薦」「取消 primary」「加 security」「只用 Codex 中性」「把 Flash 換成 Pro」。已有明確指定就沿用，不重問同一決定；推薦只在 user 說「照推薦」時轉成 `selected`。未回覆不等於接受推薦——**互動情境**下 user 沒回答就停在選用階段，不派任何 reviewer。
+
+**無人值守情境**（`/goal` 等 user 不在場、沒有人可以回答）是明文例外：優先沿用已明確保存的 `REVIEW_SELECTION`；沒有就把所有 `recommended` cell 轉成 `selected` 跑預設推薦集（含 Gemini Flash 與 Codex `default` preset），不 block。報告 header 的選席行必須註明「按預設推薦集」，讓讀者分得出「人選的」與「沒人在、照預設跑的」。`optional` cell 在這條例外下一律不選。
 
 `REVIEW_SELECTION` 至少保留以下投影，供 Step 3、Step 4、Step 5 共用：
 
