@@ -41,7 +41,19 @@ def load_mutation_core():
   return module
 
 
-MUTATION = load_mutation_core()
+def _local_make_finding_uid(file_path, anchor, root_cause):
+  normalized_cause = re.sub(r'\s+', ' ', str(root_cause)).strip()
+  payload = '\0'.join((str(file_path), str(anchor), normalized_cause))
+  return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20]
+
+
+def resolve_make_finding_uid():
+  if MUTATION_CORE.exists():
+    return load_mutation_core().make_finding_uid
+  return _local_make_finding_uid
+
+
+MAKE_FINDING_UID = resolve_make_finding_uid()
 
 
 def normalize_root_cause(value):
@@ -88,7 +100,7 @@ def verification_fields(finding):
 
 
 def single_pr_finding_uid(file_path, anchor, root_cause):
-  return MUTATION.make_finding_uid(str(file_path), str(anchor), str(root_cause))
+  return MAKE_FINDING_UID(str(file_path), str(anchor), str(root_cause))
 
 
 def finding_uid(file_path, anchor, root_cause, target_identity=None):
